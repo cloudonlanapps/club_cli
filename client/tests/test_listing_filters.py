@@ -196,3 +196,31 @@ def test_issue_6_help_describes_each_option_and_its_values(command, expected):
     assert res.exit_code == 0
     for phrase in expected:
         assert phrase in text, phrase
+
+
+# ------------------------------------------- options the server never took (club_cli#11)
+
+
+def test_issue_11_events_list_sends_only_what_the_server_takes(monkeypatch):
+    params = _params(
+        monkeypatch, "/v1/events",
+        "events", "list", "--type", "camp", "--visibility", "public", "--venue-id", "4",
+        "--from", "2026-07-01T00:00:00", "--to", "2026-07-31T23:59:00",
+    )
+
+    assert set(params) == {"fromTimeUtc", "toTimeUtc", "type", "visibility", "venueId", "offset", "limit"}
+
+
+def test_issue_11_events_list_bare_sends_only_the_page(monkeypatch):
+    assert _params(monkeypatch, "/v1/events", "events", "list") == {"offset": 0, "limit": 20}
+
+
+@pytest.mark.parametrize("option", [("--organizer", "coach_a"), ("--include-past",)])
+def test_issue_11_removed_options_are_refused(monkeypatch, option):
+    fake = FakeHttp().install(monkeypatch)
+
+    res = run("events", "list", *option)
+
+    assert res.exit_code != 0
+    assert f"No such option: {option[0]}" in res.output
+    assert fake.calls == []

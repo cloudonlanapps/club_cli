@@ -226,7 +226,7 @@ event JSON:
     PW=$(just _admin_pw)
     TITLE=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['title'])" {{JSON}})
     if uv run --project client club_client --base-url {{URL}} -u {{USER}} --pw "$PW" \
-         events list --include-past --limit 100 \
+         events list --limit 100 \
        | python3 -c "import json,sys; sys.exit(0 if any(e.get('title')==sys.argv[1] for e in json.load(sys.stdin).get('items',[])) else 1)" "$TITLE"; then
       echo "event exists, skipping: $TITLE"; exit 0
     fi
@@ -393,7 +393,7 @@ event_delete JSON:
     TITLE=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['title'])" {{JSON}})
     ADMIN_PW=$(just _admin_pw)
     ID=$(uv run --project client club_client --base-url {{URL}} -u {{USER}} --pw "$ADMIN_PW" \
-           events list --include-past --limit 100 \
+           events list --limit 100 \
          | python3 -c "import json,sys; [print(e['id']) for e in json.load(sys.stdin).get('items',[]) if e.get('title')==sys.argv[1]]" "$TITLE")
     if [[ -z "$ID" ]]; then echo "event not found: $TITLE"; exit 0; fi
     uv run --project client club_client --base-url {{URL}} -u {{USER}} --pw "$ADMIN_PW" \
@@ -492,7 +492,7 @@ event_hard_delete JSON:
     TITLE=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['title'])" {{JSON}})
     ADMIN_PW=$(just _admin_pw)
     ID=$(uv run --project client club_client --base-url {{URL}} -u {{USER}} --pw "$ADMIN_PW" \
-           events list --include-past --limit 100 \
+           events list --limit 100 \
          | python3 -c "import json,sys; [print(e['id']) for e in json.load(sys.stdin).get('items',[]) if e.get('title')==sys.argv[1]]" "$TITLE")
     if [[ -z "$ID" ]]; then echo "event not found: $TITLE"; exit 0; fi
     uv run --project client club_client --base-url {{URL}} -u {{USER}} --pw "$ADMIN_PW" \
