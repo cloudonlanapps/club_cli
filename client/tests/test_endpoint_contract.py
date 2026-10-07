@@ -65,10 +65,7 @@ UNSENT_BY_DESIGN: dict[tuple[str, str, str], str] = {
 # Parameters and fields an open issue already owns an option for, each naming
 # its issue. The entry goes when the issue lands (a test below fails once a
 # command sends it), so nothing here can quietly become permanent.
-PARAMETERS_CLAIMED_BY_OPEN_ISSUES: dict[tuple[str, str, str], str] = {
-    ("POST", "/v1/users/by_id/{}/approve", "resolutionReason"): "club_cli#7",
-    ("POST", "/v1/users/by_id/{}/block", "resolutionReason"): "club_cli#7",
-}
+PARAMETERS_CLAIMED_BY_OPEN_ISSUES: dict[tuple[str, str, str], str] = {}
 
 VERBS = ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE")
 ANY = "*"

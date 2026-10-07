@@ -940,13 +940,32 @@ def user_update(ctx: Context, username: str, json_input: str):
     print_response(response)
 
 
+# Shared by `user approve` and `user block`.
+RESOLUTION_REASON_HELP = (
+    "Optional. Saved as the closing note on the user's open review request "
+    "(the one `user reconsider` opened); up to 500 characters. With no open "
+    "request there is nothing to attach it to and it is not kept."
+)
+
+
+def resolution_body(reason: str | None) -> dict[str, str] | None:
+    """The body `approve` and `block` take, or none when no reason is given."""
+    return {"resolutionReason": reason} if reason else None
+
+
 @user.command("block")
 @click.argument("username")
+@click.option("--reason", help=RESOLUTION_REASON_HELP)
 @pass_context
-def user_block(ctx: Context, username: str):
-    """Block a user."""
+def user_block(ctx: Context, username: str, reason: str | None):
+    """Block a user.
+
+    Example: user block alice
+    Example: user block alice --reason "Duplicate of alice2"
+    """
     response = httpx.post(
         f"{ctx.base_url}/v1/users/by_id/{username}/block",
+        json=resolution_body(reason),
         headers=ctx.headers,
     )
     print_response(response)
@@ -966,11 +985,17 @@ def user_delete(ctx: Context, username: str):
 
 @user.command("approve")
 @click.argument("username")
+@click.option("--reason", help=RESOLUTION_REASON_HELP)
 @pass_context
-def user_approve(ctx: Context, username: str):
-    """Approve a pending user (admin, pending → active)."""
+def user_approve(ctx: Context, username: str, reason: str | None):
+    """Approve a pending user (admin, pending → active).
+
+    Example: user approve alice
+    Example: user approve alice --reason "Phone number confirmed"
+    """
     response = httpx.post(
         f"{ctx.base_url}/v1/users/by_id/{username}/approve",
+        json=resolution_body(reason),
         headers=ctx.headers,
     )
     print_response(response)
