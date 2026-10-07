@@ -339,12 +339,15 @@ def main(
 @main.command("capabilities")
 @pass_context
 def capabilities(ctx: Context):
-    """What this deployment can do: {creditSystem, evaluations, eventMarketing, identityVerification}.
+    """What this deployment can do: {creditSystem, evaluations, eventMarketing, identityVerification, defaultCountryCode}.
 
     Anyone may ask, before login too. The optional modules' routes exist on
     every deployment and answer 503 while off, so this is the way to find out.
     identityVerification false means registration lands in pending, with no
     identity document to upload before review.
+    defaultCountryCode is the club's country calling code, one to three
+    digits without "+" (e.g. "91"): the club apps put it in front of a phone
+    number typed without one. It is null when the deployment sets none.
 
     Example: capabilities
     """

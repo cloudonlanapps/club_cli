@@ -32,6 +32,14 @@ def test_capabilities_match_the_stack(live: Live):
     assert {m: live.caps[m] for m in MODULES} == {m: expected for m in MODULES}
 
 
+def test_capabilities_report_the_stacks_country_code(live: Live):
+    """cli_test.conf sets default_country_code; the modules-off conf sets none (club_server#15)."""
+    assert "defaultCountryCode" in live.caps, live.caps
+    if EXPECT_MODULES is None:
+        pytest.skip("CLUB_EXPECT_MODULES not set; nothing to compare against")
+    assert live.caps["defaultCountryCode"] == ("91" if EXPECT_MODULES == "on" else None)
+
+
 # ── Identity verification (club_server#428, cli #34) ────────────────────
 
 
