@@ -145,6 +145,18 @@ def test_events_list_narrows_by_venue_and_window(live: Live):
     assert ids("--from", local(days_from_today(40))) == []
 
 
+def test_events_list_includes_past_events_unasked(live: Live):
+    """club_cli#11: the server lists past events unless --from says otherwise."""
+    venue = live.venue()
+    past = live.event("camp", days_from_today(-10), rrule="FREQ=DAILY;COUNT=2", venueId=venue)
+
+    def ids(*options: str) -> list[int]:
+        return [e["id"] for e in live.ok("events", "list", "--venue-id", str(venue), *options)["items"]]
+
+    assert ids() == [past["id"]]
+    assert ids("--from", local(days_from_today(0))) == []
+
+
 @pytest.mark.modules_on
 def test_credits_entries_narrows_by_occurrence(live: Live):
     """Marking a funded programme member present writes a deduction against that occurrence."""

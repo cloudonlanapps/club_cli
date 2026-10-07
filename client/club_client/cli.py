@@ -1139,8 +1139,6 @@ def events_create(ctx: Context, json_input: str):
 @events.command("list")
 @click.option("--type", "event_type", help="Filter by event type: oneOff, programme, camp")
 @click.option("--visibility", help="Filter by visibility: public, private")
-@click.option("--organizer", help="Filter by organizer username")
-@click.option("--include-past", is_flag=True, help="Include past events")
 @click.option("--from", "from_time", help="Only events still running at or after this time (local ISO or 'YYYYMMDD HHMM')")
 @click.option("--to", "to_time", help="Only events starting at or before this time (local ISO or 'YYYYMMDD HHMM')")
 @click.option("--venue-id", type=int, help="Only events at this venue")
@@ -1152,8 +1150,6 @@ def events_list(
     ctx: Context,
     event_type: str | None,
     visibility: str | None,
-    organizer: str | None,
-    include_past: bool,
     from_time: str | None,
     to_time: str | None,
     venue_id: int | None,
@@ -1162,6 +1158,7 @@ def events_list(
 ):
     """List events with optional filters.
 
+    Past events are listed too; bound the list in time with --from and --to.
     --from keeps an event that starts at or after the time, or runs up to
     it or beyond (an open-ended programme always does); --to keeps one that
     starts at or before the time.
@@ -1173,13 +1170,11 @@ def events_list(
     The reference day is the day a camp or one-off starts, and a programme's
     next occurrence that is not cancelled (today when it has none).
     """
-    params: dict[str, str | int | bool] = {"offset": offset, "limit": limit, "includePast": include_past}
+    params: dict[str, str | int] = {"offset": offset, "limit": limit}
     if event_type:
         params["type"] = event_type
     if visibility:
         params["visibility"] = visibility
-    if organizer:
-        params["organizerName"] = organizer
     if from_time:
         params["fromTimeUtc"] = local_iso_to_utc_ms(parse_local_time(from_time))
     if to_time:
