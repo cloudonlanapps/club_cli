@@ -46,14 +46,23 @@ CLUB_TEST_CONFS=cli_test.conf:on just test  # one stack only
 just test_to http://127.0.0.1:8400         # a running server, read-only checks
 ```
 
-`just test` runs the suite twice, each time against a fresh club_server
+`just test` needs `just`, `uv`, `jq`, `git` and PostgreSQL installed, and
+nothing else. It runs the suite twice, each time against a fresh club_server
 cloned at `main` by `background_server.sh` from
-[native_deploy](https://github.com/cloudonlanapps/native_deploy), which must
-be on `PATH`:
+[native_deploy](https://github.com/cloudonlanapps/native_deploy):
 `cli_test.conf` has every optional module on (credits, evaluations, event
 marketing, identity verification) and `cli_test_modules_off.conf` has them
 all off. Point a conf's `source` at a local checkout to test uncommitted
 server changes.
+
+`just test` clones native_deploy itself, into `.native_deploy/` (gitignored),
+and brings it up to date on every run. `NATIVE_DEPLOY_REF` selects a branch
+or a commit (default `main`); `NATIVE_DEPLOY_URL` selects another remote or a
+local checkout.
+
+```bash
+NATIVE_DEPLOY_REF=<branch-or-commit> just test
+```
 
 - Most tests are offline: `tests/fakes.py` stands in for `httpx` and checks
   which endpoint each command calls, with what body.
