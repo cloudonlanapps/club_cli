@@ -2099,7 +2099,16 @@ def enrollment():
 @click.argument("event_id", type=int)
 @pass_context
 def enrollment_list(ctx: Context, event_id: int):
-    """List enrollments for an event.
+    """List enrollments for an event: {enrollments, records}.
+
+    enrollments maps each membername to a status; records carries the full
+    rows. A row's eligible is false while the member is enrolled (accepted,
+    assigned, assignedTrial, withdrawRequested) and no longer meets the
+    event's gender or age window, worked out when read; it is true for
+    every other row. Nobody is removed automatically. For a programme with
+    a live occurrence, admins get the notification
+    enrollment.member_ineligible once a day for each member who has newly
+    stopped matching; camps and one-offs are not scanned.
 
     Example: enrollment list 5
     """
@@ -2552,6 +2561,11 @@ def myevents_schedules(ctx: Context, event_id: int):
 @pass_context
 def myevents_enrollment(ctx: Context, event_id: int):
     """Get my enrollment status for an event.
+
+    eligible is false while I am enrolled (accepted, assigned,
+    assignedTrial, withdrawRequested) and no longer meets the event's gender
+    or age window, worked out when read; true otherwise. Nobody is removed
+    automatically.
 
     Example: myevents enrollment 5
     """
@@ -4201,6 +4215,12 @@ def notifications():
 @pass_context
 def notifications_list(ctx: Context, unread_only: bool, offset: int, limit: int):
     """List my notifications, newest first.
+
+    Each carries a type and its data. Two tell admins, once a day, that a
+    member has newly stopped meeting an age band or gender:
+    enrollment.member_ineligible (data: eventId, eventTitle, membername),
+    for an enrolled member of a programme, and group.member_ineligible
+    (data: groupId, groupName, membername), for a semi-auto group member.
 
     Example: notifications list --unread-only
     """

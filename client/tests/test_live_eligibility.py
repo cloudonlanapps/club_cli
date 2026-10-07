@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
-from .live import Live, days_from_today
+from .live import MEMBER_PASSWORD, Live, days_from_today
 
 # Live.member_json gives every member this date of birth.
 MEMBER_BORN = "2012-05-03"
@@ -115,3 +115,29 @@ def test_semi_auto_member_outside_the_band_is_listed_not_eligible(live: Live):
 
 def _utc_ms(iso: str) -> int:
     return int(datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp() * 1000)
+
+
+def test_enrolled_member_outside_the_window_is_listed_not_eligible(live: Live):
+    """club_server#19: an assigned member whose date of birth is corrected out of the window."""
+    age = age_today(MEMBER_BORN)
+    member = live.active_member()
+    camp = live.event(
+        "camp", days_from_today(20), rrule="FREQ=DAILY;COUNT=2",
+        minAge=age - 1, maxAge=age + 2, strictAge=True,
+    )
+    eid = str(camp["id"])
+    live.ok("enrollment", "assign", eid, member)
+
+    def rows() -> tuple[dict, dict]:
+        (staff_view,) = [r for r in live.ok("enrollment", "list", eid)["records"] if r["membername"] == member]
+        own_view = live.ok("myevents", "enrollment", eid, user=member, pw=MEMBER_PASSWORD)
+        return staff_view, own_view
+
+    assert [r["eligible"] for r in rows()] == [True, True]
+
+    live.ok("user", "update", member, json.dumps({"dateOfBirthUtc": _utc_ms(BORN_TOO_EARLY)}))
+
+    staff_view, own_view = rows()
+    assert staff_view["eligible"] is False and own_view["eligible"] is False
+    # Nobody is removed automatically.
+    assert staff_view["status"] == "assigned"
