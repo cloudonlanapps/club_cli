@@ -69,7 +69,11 @@ NATIVE_DEPLOY_REF=<branch-or-commit> just test
 - `test_endpoint_contract.py` reads the server's `openapi.json` and checks,
   method by method, that every operation the CLI calls exists and that every
   operation the server offers has a command. A new server endpoint fails it
-  until it is wrapped.
+  until it is wrapped. It checks one level down as well: every query
+  parameter an operation takes, and every field of a request body a command
+  builds itself, must be sent by a command, so a new server option fails it
+  until a command has it. What is deliberately not sent is listed in
+  `UNSENT_BY_DESIGN` with its reason.
 - `test_live_*.py` drive the CLI against the server and assert whichever
   mode the stack reports. They create users, events and uploads, so they run
   only with `CLUB_LIVE_WRITES=1`, which `just test` sets and `just test_to`
