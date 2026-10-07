@@ -836,16 +836,58 @@ def users_create(ctx: Context, json_input: str, guest: bool) -> None:
     print_response(response)
 
 
+ROLE_CHOICE = click.Choice(["admin", "coach"])
+USER_SORT_CHOICE = click.Choice(["username", "firstName", "lastName"])
+
+
 @users.command("list")
 @click.option("--status", "status_filter", help="Filter by status: registered, pending, active, blocked, left")
+@click.option("--role", type=ROLE_CHOICE, help="Only users holding this role: admin, coach")
+@click.option("--search", "search_term", help="Only users whose username, first name, last name, nickname or email contains this text (any case)")
+@click.option("--sort-by", type=USER_SORT_CHOICE, help="Sort by this field (default: creation time)")
+@click.option("--descending", is_flag=True, default=False, help="Reverse the sort: Z to A, or newest first when sorting by creation time")
+@click.option("--min-age", type=click.IntRange(min=0), help="Only users at least this many years old today")
+@click.option("--max-age", type=click.IntRange(min=0), help="Only users at most this many years old today")
 @click.option("--offset", default=0, help="Pagination offset")
 @click.option("--limit", default=20, help="Pagination limit")
 @pass_context
-def users_list(ctx: Context, status_filter: str | None, offset: int, limit: int) -> None:
-    """List all users (admin only)."""
-    params: dict[str, str | int] = {"offset": offset, "limit": limit}
+def users_list(
+    ctx: Context,
+    status_filter: str | None,
+    role: str | None,
+    search_term: str | None,
+    sort_by: str | None,
+    descending: bool,
+    min_age: int | None,
+    max_age: int | None,
+    offset: int,
+    limit: int,
+) -> None:
+    """List all users (admin only).
+
+    Without --status, registered users (signed up, not yet submitted for
+    review) are left out. Filters combine: every one given must match. A
+    user with no date of birth matches neither age filter.
+
+    Example: users list --role coach --sort-by lastName
+    Example: users list --search ann --min-age 10 --max-age 14
+    Example: users list --descending
+    """
+    params: dict[str, str | int | bool] = {"offset": offset, "limit": limit}
     if status_filter:
         params["status"] = status_filter
+    if role:
+        params["role"] = role
+    if search_term:
+        params["searchTerm"] = search_term
+    if sort_by:
+        params["sortBy"] = sort_by
+    if descending:
+        params["descending"] = True
+    if min_age is not None:
+        params["minAge"] = min_age
+    if max_age is not None:
+        params["maxAge"] = max_age
     response = httpx.get(
         f"{ctx.base_url}/v1/users",
         params=params,
@@ -988,9 +1030,6 @@ def user_reactivate(ctx: Context, username: str):
 
 
 # Super admin is a flag moved only by transfer-superadmin, never a role (club_server#514).
-ROLE_CHOICE = click.Choice(["admin", "coach"])
-
-
 @user.command("add-role")
 @click.argument("username")
 @click.argument("role", type=ROLE_CHOICE)
@@ -1077,6 +1116,9 @@ def events_create(ctx: Context, json_input: str):
 @click.option("--visibility", help="Filter by visibility: public, private")
 @click.option("--organizer", help="Filter by organizer username")
 @click.option("--include-past", is_flag=True, help="Include past events")
+@click.option("--from", "from_time", help="Only events still running at or after this time (local ISO or 'YYYYMMDD HHMM')")
+@click.option("--to", "to_time", help="Only events starting at or before this time (local ISO or 'YYYYMMDD HHMM')")
+@click.option("--venue-id", type=int, help="Only events at this venue")
 @click.option("--offset", default=0, help="Pagination offset")
 @click.option("--limit", default=20, help="Pagination limit")
 @pass_context
@@ -1087,10 +1129,20 @@ def events_list(
     visibility: str | None,
     organizer: str | None,
     include_past: bool,
+    from_time: str | None,
+    to_time: str | None,
+    venue_id: int | None,
     offset: int,
     limit: int,
 ):
     """List events with optional filters.
+
+    --from keeps an event that starts at or after the time, or runs up to
+    it or beyond (an open-ended programme always does); --to keeps one that
+    starts at or before the time.
+
+    Example: events list --type camp --from "2026-07-01T00:00:00" --to "2026-07-31T23:59:00"
+    Example: events list --venue-id 4
 
     {AGE_WINDOW_HELP}
     The reference day is the day a camp or one-off starts, and a programme's
@@ -1103,6 +1155,12 @@ def events_list(
         params["visibility"] = visibility
     if organizer:
         params["organizerName"] = organizer
+    if from_time:
+        params["fromTimeUtc"] = local_iso_to_utc_ms(parse_local_time(from_time))
+    if to_time:
+        params["toTimeUtc"] = local_iso_to_utc_ms(parse_local_time(to_time))
+    if venue_id is not None:
+        params["venueId"] = venue_id
     response = httpx.get(
         f"{ctx.base_url}/v1/events",
         params=params,
@@ -2095,10 +2153,17 @@ def enrollment():
     pass
 
 
+ENROLLMENT_STATUS_CHOICE = click.Choice([
+    "invited", "requested", "accepted", "rejected", "assigned", "assignedTrial",
+    "withdrawn", "withdrawRequested", "declined", "removed",
+])
+
+
 @enrollment.command("list")
 @click.argument("event_id", type=int)
+@click.option("--status", "status_filter", type=ENROLLMENT_STATUS_CHOICE, help="Only enrollments in this status")
 @pass_context
-def enrollment_list(ctx: Context, event_id: int):
+def enrollment_list(ctx: Context, event_id: int, status_filter: str | None):
     """List enrollments for an event: {enrollments, records}.
 
     enrollments maps each membername to a status; records carries the full
@@ -2111,9 +2176,11 @@ def enrollment_list(ctx: Context, event_id: int):
     stopped matching; camps and one-offs are not scanned.
 
     Example: enrollment list 5
+    Example: enrollment list 5 --status assignedTrial
     """
     response = httpx.get(
         f"{ctx.base_url}/v1/events/by_id/{event_id}/enrollments",
+        params={"status": status_filter} if status_filter else None,
         headers=ctx.headers,
     )
     print_response(response)
@@ -2753,6 +2820,7 @@ def credits_list(
 @click.option("--account-id", help="Filter by account code")
 @click.option("--event-id", type=int, help="Filter by programme")
 @click.option("--entry-type", help="grant, grantReversal, sessionDeduction, sessionRefund, penalty, transferOut, transferIn, validityExtended")
+@click.option("--occurrence", "occurrence_time_local", help="Entries for the occurrence that starts at this local time (local ISO or 'YYYYMMDD HHMM'): its deductions and refunds")
 @click.option("--from", "from_local", help="Entries created at or after this local time")
 @click.option("--to", "to_local", help="Entries created before this local time")
 @click.option("--order", type=click.Choice(["asc", "desc"]), help="Oldest first (asc) or newest first (desc); omitted, the server's default (asc)")
@@ -2765,6 +2833,7 @@ def credits_entries(
     account_id: str | None,
     event_id: int | None,
     entry_type: str | None,
+    occurrence_time_local: str | None,
     from_local: str | None,
     to_local: str | None,
     order: str | None,
@@ -2781,10 +2850,14 @@ def credits_entries(
     Neither depends on the filters or page asked for.
 
     Example: credits entries --account-id AB12CD34 --from "2026-05-01T00:00:00"
+    Example: credits entries --event-id 7 --occurrence "20260503 0630"
     """
     params = credit_window_params(
         from_local, to_local,
         membername=membername, accountId=account_id, eventId=event_id, entryType=entry_type,
+        occurrenceTimeUtc=(
+            local_iso_to_utc_ms(parse_local_time(occurrence_time_local)) if occurrence_time_local else None
+        ),
         order=order,
     )
     params.update(offset=offset, limit=limit)
@@ -3306,8 +3379,13 @@ def group_delete(ctx: Context, group_id: int):
 
 @group.command("members")
 @click.argument("group_id", type=int)
+@click.option(
+    "--sort-by", type=click.Choice(["membername", "firstName", "lastName", "nickname"]),
+    help="Sort by this field (default: the server's own order)",
+)
+@click.option("--descending", is_flag=True, default=False, help="Reverse the sort given by --sort-by")
 @pass_context
-def group_members(ctx: Context, group_id: int):
+def group_members(ctx: Context, group_id: int, sort_by: str | None, descending: bool):
     """List members of a group: {membername, firstName, lastName, nickname, eligible}.
 
     eligible is false for a semi-auto member who no longer meets the group's
@@ -3315,9 +3393,16 @@ def group_members(ctx: Context, group_id: int):
     and auto groups, are always true. Nobody is removed automatically.
 
     Example: group members 1
+    Example: group members 1 --sort-by lastName --descending
     """
+    params: dict[str, str | bool] = {}
+    if sort_by:
+        params["sortBy"] = sort_by
+    if descending:
+        params["descending"] = True
     response = httpx.get(
         f"{ctx.base_url}/v1/groups/by_id/{group_id}/members",
+        params=params or None,
         headers=ctx.headers,
     )
     print_response(response)
@@ -3864,15 +3949,21 @@ def media_set_metadata(
 @click.option("--offset", default=0, help="Pagination offset")
 @click.option("--limit", default=100, help="Pagination limit")
 @click.option("--media-type", "media_type", default=None, help="Filter by media type")
+@click.option("--status", "conversion_status", default=None, help="Filter by conversion status, e.g. pending, completed")
 @pass_context
-def media_myfiles(ctx: Context, offset: int, limit: int, media_type: str | None) -> None:
+def media_myfiles(
+    ctx: Context, offset: int, limit: int, media_type: str | None, conversion_status: str | None,
+) -> None:
     """List media you uploaded.
 
     Example: media myfiles
+    Example: media myfiles --media-type video --status pending
     """
     params: dict[str, Any] = {"offset": offset, "limit": limit}
     if media_type:
         params["mediaType"] = media_type
+    if conversion_status:
+        params["conversionStatus"] = conversion_status
     print_response(httpx.get(f"{ctx.base_url}/v1/media/myfiles", params=params, headers=ctx.headers))
 
 
@@ -3934,18 +4025,47 @@ def trash() -> None:
 
 @trash.command("list")
 @click.argument("owner_type", type=click.Choice(sorted(TRASH_PATHS)))
+@click.option("--search", "search_term", help="user only: username, first name, last name, nickname or email contains this text (any case)")
+@click.option("--sort-by", type=USER_SORT_CHOICE, help="user only: sort by this field (default: deletion time)")
+@click.option("--descending", is_flag=True, default=False, help="user only: reverse the sort")
 @click.option("--offset", default=0, help="Pagination offset")
 @click.option("--limit", default=100, help="Pagination limit")
 @pass_context
-def trash_list(ctx: Context, owner_type: str, offset: int, limit: int) -> None:
+def trash_list(
+    ctx: Context,
+    owner_type: str,
+    search_term: str | None,
+    sort_by: str | None,
+    descending: bool,
+    offset: int,
+    limit: int,
+) -> None:
     """List soft-deleted records of one kind.
 
+    The server searches and sorts deleted users only, so --search, --sort-by
+    and --descending are refused for every other kind.
+
     Example: trash list venue
+    Example: trash list user --search ann --sort-by lastName
     """
+    params: dict[str, str | int | bool] = {"offset": offset, "limit": limit}
+    user_only = {"--search": search_term, "--sort-by": sort_by, "--descending": descending}
+    given = [option for option, value in user_only.items() if value]
+    if given and owner_type != "user":
+        raise click.UsageError(
+            f"{', '.join(given)} applies to `trash list user` only; "
+            f"the server does not search or sort deleted {owner_type} records."
+        )
+    if search_term:
+        params["searchTerm"] = search_term
+    if sort_by:
+        params["sortBy"] = sort_by
+    if descending:
+        params["descending"] = True
     coll = TRASH_PATHS[owner_type]
     response = httpx.get(
         f"{ctx.base_url}/v1/{coll}/deleted",
-        params={"offset": offset, "limit": limit},
+        params=params,
         headers=ctx.headers,
     )
     print_response(response)
@@ -3983,19 +4103,25 @@ def upload():
 @uploads.command("list")
 @click.option("--media-type", help="Filter by media type (image, video)")
 @click.option("--status", "conversion_status", help="Filter by conversion status")
+@click.option("--include-deleted", is_flag=True, default=False, help="Also list soft-deleted uploads (deletedAtUtc is set on those)")
 @click.option("--offset", default=0, help="Pagination offset")
 @click.option("--limit", default=20, help="Pagination limit")
 @pass_context
-def uploads_list(ctx: Context, media_type: str | None, conversion_status: str | None, offset: int, limit: int):
+def uploads_list(
+    ctx: Context, media_type: str | None, conversion_status: str | None, include_deleted: bool,
+    offset: int, limit: int,
+):
     """List uploaded media.
 
     Example: uploads list
     Example: uploads list --media-type image
+    Example: uploads list --include-deleted
     """
     response = ctx.upload.list_uploads(
         ctx.base_url, ctx.headers,
         offset=offset, limit=limit,
         media_type=media_type, conversion_status=conversion_status,
+        include_deleted=include_deleted,
     )
     print_response(response)
 

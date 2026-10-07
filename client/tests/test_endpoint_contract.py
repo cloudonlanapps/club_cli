@@ -66,17 +66,6 @@ UNSENT_BY_DESIGN: dict[tuple[str, str, str], str] = {
 # its issue. The entry goes when the issue lands (a test below fails once a
 # command sends it), so nothing here can quietly become permanent.
 PARAMETERS_CLAIMED_BY_OPEN_ISSUES: dict[tuple[str, str, str], str] = {
-    **{("GET", "/v1/users", name): "club_cli#6" for name in (
-        "role", "searchTerm", "sortBy", "descending", "minAge", "maxAge",
-    )},
-    **{("GET", "/v1/users/deleted", name): "club_cli#6" for name in ("searchTerm", "sortBy", "descending")},
-    **{("GET", "/v1/groups/by_id/{}/members", name): "club_cli#6" for name in ("sortBy", "descending")},
-    ("GET", "/v1/events/by_id/{}/enrollments", "status"): "club_cli#6",
-    ("GET", "/v1/media", "includeDeleted"): "club_cli#6",
-    # Not in #6's table; found by this test and taken up with it.
-    **{("GET", "/v1/events", name): "club_cli#6" for name in ("fromTimeUtc", "toTimeUtc", "venueId")},
-    ("GET", "/v1/media/myfiles", "conversionStatus"): "club_cli#6",
-    ("GET", "/v1/credits/entries", "occurrenceTimeUtc"): "club_cli#6",
     ("POST", "/v1/users/by_id/{}/approve", "resolutionReason"): "club_cli#7",
     ("POST", "/v1/users/by_id/{}/block", "resolutionReason"): "club_cli#7",
 }
