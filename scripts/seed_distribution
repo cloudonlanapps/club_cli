@@ -1,0 +1,282 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
+"""Seed a demographic distribution of users with full lifecycle + documents.
+
+Drives the seed users in --src-dir through a target distribution of
+registration lifecycle states, generating synthetic identity cards and
+submitting them where required. All server interaction goes through the
+tested ``club_client`` CLI.
+
+Lifecycle states and how each is reached (each step is one server call):
+
+  registered   register
+  pending      register -> upload doc(s) -> submit-for-review
+  active       register -> upload doc(s) -> submit -> approve
+  blocked      ... active ... -> block
+  left         ... active ... -> mark-left
+  soft-deleted ... active ... -> delete   (soft)
+
+Documents (1 or 2 synthetic ID cards, randomised per user) are generated
+with scripts/seed_gen_card and uploaded as the user. ``registered`` users
+get no documents.
+
+Where the deployment does not verify identity (``capabilities`` reports
+``identityVerification: false``, club_server#428), registration already lands
+in ``pending``: no documents are generated or uploaded, submit-for-review is
+skipped, and the ``registered`` share of the distribution comes out as
+``pending`` — that state cannot be reached there.
+
+Rate limiting: ``--delay`` seconds are slept after every server-touching
+call. Pass ``--delay 0`` on dev; use a non-zero value when pointing at
+beta/prod so the shared script does not trip server-side throttling.
+
+Re-runnable: a user that already exists (register conflict) is skipped and
+its remaining steps still run, so an interrupted seed can be resumed.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import random
+import subprocess
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+SEED_GEN_CARD = REPO / "scripts" / "seed_gen_card"
+DEFAULT_SRC = REPO / "seeds" / "users"
+DEFAULT_WORK = REPO / "seeds" / "_distribution_build"
+
+# state -> count. Order matters only for deterministic slicing.
+DISTRIBUTION: list[tuple[str, int]] = [
+    ("registered", 20),
+    ("pending", 20),
+    ("active", 40),
+    ("blocked", 10),
+    ("left", 5),
+    ("soft-deleted", 5),
+]
+
+# steps each state needs beyond "registered"
+NEEDS_DOCS = {"pending", "active", "blocked", "left", "soft-deleted"}
+NEEDS_APPROVE = {"active", "blocked", "left", "soft-deleted"}
+TERMINAL_ACTION = {"blocked": "block", "left": "mark-left", "soft-deleted": "delete"}
+
+
+def log(msg: str) -> None:
+    print(msg, flush=True)
+
+
+class Runner:
+    def __init__(self, args: argparse.Namespace):
+        self.base_url = args.base_url
+        self.admin_user = args.admin_user
+        self.admin_pw = args.admin_pw
+        self.delay = args.delay
+        self.dry_run = args.dry_run
+        # submit-for-review gates on this exact tag.
+        self.id_tag = "identity_document"
+
+    def _cli(self, *cli_args: str, auth: tuple[str, str] | None = None) -> subprocess.CompletedProcess:
+        cmd = [
+            "uv", "run", "--project", str(REPO / "client"), "club_client",
+            "--base-url", self.base_url,
+        ]
+        if auth:
+            cmd += ["-u", auth[0], "--pw", auth[1]]
+        cmd += list(cli_args)
+        if self.dry_run:
+            shown = [a if a != self.admin_pw else "***" for a in cmd]
+            log("    DRY: " + " ".join(shown[6:]))
+            return subprocess.CompletedProcess(cmd, 0, "{}", "")
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if self.delay:
+            time.sleep(self.delay)
+        return proc
+
+    def admin(self, *cli_args: str) -> subprocess.CompletedProcess:
+        return self._cli(*cli_args, auth=(self.admin_user, self.admin_pw))
+
+    def as_user(self, user: str, pw: str, *cli_args: str) -> subprocess.CompletedProcess:
+        return self._cli(*cli_args, auth=(user, pw))
+
+
+def to_dob_ms(iso: str) -> int | None:
+    if not iso:
+        return None
+    try:
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.astimezone()
+        return int(dt.timestamp() * 1000)
+    except ValueError:
+        return None
+
+
+def assign_states(usernames: list[str], rng: random.Random) -> dict[str, str]:
+    expected = sum(c for _, c in DISTRIBUTION)
+    if len(usernames) != expected:
+        log(f"WARNING: {len(usernames)} users but distribution sums to {expected}; "
+            "states will cover min(len, sum).")
+    order = usernames[:]
+    rng.shuffle(order)
+    out: dict[str, str] = {}
+    i = 0
+    for state, count in DISTRIBUTION:
+        for _ in range(count):
+            if i >= len(order):
+                break
+            out[order[i]] = state
+            i += 1
+    return out
+
+
+def build_work_json(src: Path, work_dir: Path, n_cards: int) -> Path:
+    """Write an enriched copy of the user JSON with an identity-document
+    array (n_cards entries) so seed_gen_card renders that many cards."""
+    data = json.loads(src.read_text())
+    user = data["username"]
+    data["identity-document"] = [
+        f"identity/{user}/id_card_{k}.png" for k in range(1, n_cards + 1)
+    ]
+    work_dir.mkdir(parents=True, exist_ok=True)
+    out = work_dir / f"{user}.json"
+    out.write_text(json.dumps(data, indent=2))
+    return out
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Seed a lifecycle distribution of users.")
+    ap.add_argument("--base-url", default="http://127.0.0.1:8400")
+    ap.add_argument("--admin-user", default="sudo")
+    ap.add_argument("--admin-pw", required=True, help="Admin password (sudo).")
+    ap.add_argument("--src-dir", type=Path, default=DEFAULT_SRC)
+    ap.add_argument("--work-dir", type=Path, default=DEFAULT_WORK)
+    ap.add_argument("--delay", type=float, default=0.5,
+                    help="Seconds slept after each server call (0 for dev).")
+    ap.add_argument("--rng-seed", type=int, default=2026)
+    ap.add_argument("--limit", type=int, default=0, help="Only process first N (testing).")
+    ap.add_argument("--dry-run", action="store_true")
+    args = ap.parse_args()
+
+    src_files = sorted(args.src_dir.glob("user_*.json"),
+                       key=lambda p: int(p.stem.split("_")[1]))
+    if not src_files:
+        log(f"No user_*.json under {args.src_dir}")
+        return 2
+    if args.limit:
+        src_files = src_files[: args.limit]
+
+    rng = random.Random(args.rng_seed)
+    usernames = [json.loads(f.read_text())["username"] for f in src_files]
+    states = assign_states(usernames, rng)
+    # per-user card count decided up front for determinism
+    card_counts = {u: rng.choice([1, 2]) for u in usernames}
+
+    runner = Runner(args)
+    results: dict[str, str] = {}
+
+    verifies_identity = True
+    if not args.dry_run:
+        caps = runner.admin("capabilities")
+        if caps.returncode != 0:
+            log(f"capabilities FAILED: {caps.stdout.strip()[:160]}")
+            return 2
+        verifies_identity = json.loads(caps.stdout).get("identityVerification", True)
+    if not verifies_identity:
+        log("identity verification is off: registration lands in pending, "
+            "no documents are uploaded, and 'registered' targets come out as 'pending'")
+
+    for idx, src in enumerate(src_files, 1):
+        data = json.loads(src.read_text())
+        user = data["username"]
+        pw = data["password"]
+        state = states.get(user, "registered")
+        if not verifies_identity and state == "registered":
+            state = "pending"
+        ncards = card_counts[user] if state in NEEDS_DOCS and verifies_identity else 0
+        log(f"[{idx}/{len(src_files)}] {user} -> {state}"
+            + (f" ({ncards} card{'s' if ncards > 1 else ''})" if ncards else ""))
+
+        # 1. register (enriched work json so docs can be generated from it)
+        work = build_work_json(src, args.work_dir, max(ncards, 1))
+        reg = runner._cli("auth", "register", str(work))
+        if reg.returncode != 0:
+            if "already" in (reg.stdout + reg.stderr).lower() or "exist" in (reg.stdout + reg.stderr).lower():
+                log("    register: already exists, continuing")
+            else:
+                log(f"    register FAILED: {reg.stdout.strip()[:160]}")
+                results[user] = f"FAIL@register"
+                continue
+
+        # 2. documents (none where the deployment does not verify identity)
+        if state in NEEDS_DOCS and verifies_identity:
+            if not args.dry_run:
+                gen = subprocess.run([str(SEED_GEN_CARD), str(work)],
+                                     capture_output=True, text=True)
+                if gen.returncode != 0:
+                    log(f"    card gen FAILED: {gen.stderr.strip()[:160]}")
+                    results[user] = "FAIL@cardgen"
+                    continue
+            for k in range(1, ncards + 1):
+                card = args.work_dir / "identity" / user / f"id_card_{k}.png"
+                up = runner.as_user(user, pw, "me", "gallery", "add-file",
+                                    str(card), "--tag", runner.id_tag)
+                if up.returncode != 0:
+                    log(f"    upload card {k} FAILED: {up.stdout.strip()[:160]}")
+                    results[user] = f"FAIL@upload{k}"
+                    break
+            else:
+                # 3. submit-for-review
+                sub = runner.as_user(user, pw, "me", "submit-for-review")
+                if sub.returncode != 0:
+                    log(f"    submit FAILED: {sub.stdout.strip()[:160]}")
+                    results[user] = "FAIL@submit"
+                    continue
+            if results.get(user, "").startswith("FAIL"):
+                continue
+
+        # 4. approve
+        if state in NEEDS_APPROVE:
+            ap_res = runner.admin("user", "approve", user)
+            if ap_res.returncode != 0:
+                log(f"    approve FAILED: {ap_res.stdout.strip()[:160]}")
+                results[user] = "FAIL@approve"
+                continue
+
+        # 5. terminal action
+        action = TERMINAL_ACTION.get(state)
+        if action:
+            term = runner.admin("user", action, user)
+            if term.returncode != 0:
+                log(f"    {action} FAILED: {term.stdout.strip()[:160]}")
+                results[user] = f"FAIL@{action}"
+                continue
+
+        results[user] = state
+
+    # summary
+    log("\n==== SUMMARY ====")
+    from collections import Counter
+    got = Counter(results.values())
+    want = dict(DISTRIBUTION)
+    if not verifies_identity:
+        want["pending"] += want.pop("registered")
+        log("  (identity verification off: 'registered' is folded into 'pending')")
+    for state, count in want.items():
+        log(f"  {state:<13} target {count:>3}   got {got.get(state, 0):>3}")
+    fails = {u: r for u, r in results.items() if r.startswith("FAIL")}
+    if fails:
+        log(f"  FAILURES ({len(fails)}):")
+        for u, r in fails.items():
+            log(f"    {u}: {r}")
+    return 1 if fails else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

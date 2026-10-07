@@ -1,0 +1,36 @@
+[project]
+name = "club-cli"
+version = "0.1.0"
+description = "CLI client for the club server API"
+requires-python = ">=3.12"
+dependencies = [
+    "click>=8.1.0",
+    "httpx>=0.28.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+club_client = "club_client.cli:main"
+club_admin  = "club_admin.cli:main"
+
+[tool.uv]
+package = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["club_client", "club_admin"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"
+markers = [
+    "modules_on: only meaningful where every optional module is on; deselected when CLUB_EXPECT_MODULES=off",
+    "modules_off: only meaningful where every optional module is off; deselected when CLUB_EXPECT_MODULES=on",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

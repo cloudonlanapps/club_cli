@@ -1,0 +1,200 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.12"
+# dependencies = ["pillow>=10.0.0"]
+# ///
+"""Generate synthetic identity-card PNGs for seeding user gallery documents.
+
+Reads a seed user JSON and renders one card per entry in its
+``identity-document`` array. Each card prints the user's name, date of
+birth, gender, and the card's own filename (so multiple cards for the
+same user are visually distinguishable). A diagonal "SAMPLE — SEED DATA"
+watermark makes the synthetic origin obvious.
+
+Pure local rendering — no network calls. Cards are written to the paths
+listed in the JSON's ``identity-document`` array; paths may be absolute
+or relative to the JSON file's directory. Existing files are not
+overwritten unless ``--force`` is passed.
+
+Usage:
+    seed_gen_card <user.json> [--force]
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
+
+CARD_W, CARD_H = 1000, 630
+
+_FONT_CANDIDATES = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+]
+
+
+def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    for p in _FONT_CANDIDATES:
+        if Path(p).exists() and (bold == ("Bold" in p) or not bold):
+            try:
+                return ImageFont.truetype(p, size=size)
+            except OSError:
+                continue
+    return ImageFont.load_default()
+
+
+def _format_dob(dob: str | int | None) -> str:
+    if dob is None:
+        return "01/01/1990"
+    if isinstance(dob, int):
+        return datetime.fromtimestamp(dob / 1000, tz=timezone.utc).strftime("%d/%m/%Y")
+    s = str(dob).split("T")[0]
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(s, fmt).strftime("%d/%m/%Y")
+        except ValueError:
+            continue
+    return s
+
+
+def _full_name(u: dict) -> str:
+    parts = [u.get("firstName", ""), u.get("middleName", ""), u.get("lastName", "")]
+    return " ".join(p for p in parts if p).strip() or u.get("username", "Unknown")
+
+
+def _dob(u: dict) -> str | int | None:
+    for k in ("dateOfBirth", "dateOfBirthUtc"):
+        if u.get(k) is not None:
+            return u[k]
+    return None
+
+
+def _draw_blurred(canvas: Image.Image, xy: tuple[int, int], text: str,
+                  font, fill: tuple[int, int, int], blur: float = 2.0) -> None:
+    layer = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    ImageDraw.Draw(layer).text(xy, text, font=font, fill=fill + (255,))
+    canvas.alpha_composite(layer.filter(ImageFilter.GaussianBlur(radius=blur)))
+
+
+def _draw_chrome(canvas: Image.Image) -> None:
+    """Background gradient, header strip, photo placeholder, fake QR."""
+    d = ImageDraw.Draw(canvas)
+
+    # Soft cream gradient.
+    top, bot = (255, 247, 230), (252, 220, 174)
+    for y in range(CARD_H):
+        t = y / CARD_H
+        d.line([(0, y), (CARD_W, y)],
+               fill=tuple(int(top[i] * (1 - t) + bot[i] * t) for i in range(3)) + (255,))
+
+    # Header tricolour.
+    d.rectangle([(0, 0), (CARD_W, 16)], fill=(255, 140, 30, 255))
+    d.rectangle([(0, 16), (CARD_W, 22)], fill=(255, 255, 255, 255))
+    d.rectangle([(0, 22), (CARD_W, 38)], fill=(40, 130, 60, 255))
+
+    # Blurred title (so it can't be mistaken for a real-issuer card).
+    _draw_blurred(canvas, (40, 50), "SAMPLE IDENTITY CARD",
+                  _font(36, bold=True), (50, 50, 50), blur=2.0)
+
+    # Photo placeholder.
+    box = (40, 160, 240, 410)
+    d.rectangle(box, fill=(210, 210, 215, 255), outline=(120, 120, 130, 255), width=2)
+    for off in range(-200, 250, 20):
+        d.line([(40 + off, 160), (40 + off + 250, 410)],
+               fill=(190, 190, 195, 255), width=1)
+    _draw_blurred(canvas, (90, 270), "PHOTO", _font(28, bold=True),
+                  (140, 140, 145), blur=2.5)
+
+    # Fake QR.
+    qr = (CARD_W - 200, CARD_H - 200, CARD_W - 40, CARD_H - 40)
+    d.rectangle(qr, fill=(255, 255, 255, 255), outline=(60, 60, 60, 255), width=2)
+    import random
+    rng = random.Random(0xA1A2A3)
+    for _ in range(220):
+        x = rng.randint(qr[0] + 10, qr[2] - 10)
+        y = rng.randint(qr[1] + 10, qr[3] - 10)
+        d.rectangle([(x, y), (x + 6, y + 6)], fill=(20, 20, 20, 255))
+    canvas.paste(canvas.crop(qr).filter(ImageFilter.GaussianBlur(radius=1.2)),
+                 (qr[0], qr[1]))
+
+
+def _draw_watermark(canvas: Image.Image) -> None:
+    layer = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    d = ImageDraw.Draw(layer)
+    font = _font(80, bold=True)
+    for y in range(-CARD_H, CARD_H * 2, 200):
+        for x in range(-CARD_W, CARD_W * 2, 600):
+            d.text((x, y), "SAMPLE — SEED DATA", font=font, fill=(200, 80, 80, 60))
+    canvas.alpha_composite(layer.rotate(-25, resample=Image.BICUBIC))
+
+
+def _draw_fields(canvas: Image.Image, full_name: str, dob_str: str,
+                 gender: str | None, doc_label: str) -> None:
+    """Crisp readable rendering of Name, DOB, Gender, and the card's filename."""
+    d = ImageDraw.Draw(canvas)
+    label_font = _font(22)
+    value_font = _font(34, bold=True)
+    x, y = 280, 180
+
+    for label, value in [
+        ("Name", full_name),
+        ("Date of Birth", dob_str),
+        ("Gender", (gender or "").upper()),
+        ("Document", doc_label),
+    ]:
+        if not value:
+            continue
+        d.text((x, y), label, font=label_font, fill=(80, 80, 80, 255))
+        d.text((x, y + 28), value, font=value_font, fill=(15, 15, 15, 255))
+        y += 80
+
+
+def render_card(out_path: Path, full_name: str, dob_str: str,
+                gender: str | None, doc_label: str) -> None:
+    canvas = Image.new("RGBA", (CARD_W, CARD_H), (255, 255, 255, 255))
+    _draw_chrome(canvas)
+    _draw_fields(canvas, full_name, dob_str, gender, doc_label)
+    _draw_watermark(canvas)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    canvas.convert("RGB").save(out_path, format="PNG", optimize=True)
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(description="Generate sample identity-card PNGs from a seed user JSON.")
+    p.add_argument("user_json", help="Path to the seed user JSON")
+    p.add_argument("--force", action="store_true",
+                   help="Re-render even if the target file already exists")
+    args = p.parse_args()
+
+    json_path = Path(args.user_json).resolve()
+    with open(json_path) as f:
+        u = json.load(f)
+
+    doc_paths = u.get("identity-document") or []
+    if not isinstance(doc_paths, list) or not doc_paths:
+        p.error(f"{json_path.name} has no 'identity-document' array")
+
+    full_name = _full_name(u)
+    dob_str = _format_dob(_dob(u))
+    gender = u.get("gender")
+
+    base_dir = json_path.parent
+    for rel in doc_paths:
+        out = Path(rel)
+        if not out.is_absolute():
+            out = base_dir / out
+        if out.exists() and not args.force:
+            print(f"skip (exists): {out}")
+            continue
+        render_card(out, full_name, dob_str, gender, doc_label=out.stem)
+        print(f"wrote: {out}")
+
+
+if __name__ == "__main__":
+    main()

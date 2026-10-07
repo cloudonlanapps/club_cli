@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyright/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Local Claude settings (shared agents/commands are tracked; per-user settings are not)
+.claude/settings.local.json
+
+# Distribution-seed working dir (enriched user JSONs + generated ID cards,
+# regenerable by scripts/seed_distribution)
+seeds/_distribution_build/

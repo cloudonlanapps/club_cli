@@ -1,0 +1,152 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.12"
+# dependencies = ["qrcode>=8.0", "pillow>=11.0"]
+# ///
+"""Generate a QR code PNG with optional logo overlay and text caption.
+
+Usage:
+    qr_generator <url> [-o OUTPUT] [-t TEXT]... [-l LOGO] [-s SIZE]
+"""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+import qrcode
+from PIL import Image, ImageDraw, ImageFont
+
+_FONT_CANDIDATES = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    "/System/Library/Fonts/Helvetica.ttc",
+]
+
+
+def _font(size: int):
+    for p in _FONT_CANDIDATES:
+        if Path(p).exists():
+            try:
+                return ImageFont.truetype(p, size=size)
+            except OSError:
+                continue
+    return ImageFont.load_default()
+
+
+def generate_qr(
+    url: str,
+    output: str,
+    text: list[str] | None = None,
+    logo_path: str | None = None,
+    size: int = 400,
+    color: str = "#F97316",
+    text_color: str = "#F97316",
+) -> None:
+    qr = qrcode.QRCode(
+        version=None,
+        error_correction=qrcode.constants.ERROR_CORRECT_H,
+        box_size=10,
+        border=4,
+    )
+    qr.add_data(url)
+    qr.make(fit=True)
+
+    qr_img = qr.make_image(fill_color=color, back_color="white").convert("RGB")
+    qr_img = qr_img.resize((size, size), Image.LANCZOS)
+
+    if logo_path:
+        logo = Image.open(logo_path).convert("RGBA")
+        logo_size = size // 4
+        logo.thumbnail((logo_size, logo_size), Image.LANCZOS)
+
+        bg = Image.new("RGBA", logo.size, (255, 255, 255, 255))
+        bg.paste(logo, (0, 0), logo)
+        logo_final = bg.convert("RGB")
+
+        padding = 8
+        padded = Image.new(
+            "RGB",
+            (logo_final.width + padding * 2, logo_final.height + padding * 2),
+            "white",
+        )
+        padded.paste(logo_final, (padding, padding))
+
+        pos_x = (qr_img.width - padded.width) // 2
+        pos_y = (qr_img.height - padded.height) // 2
+        qr_img.paste(padded, (pos_x, pos_y))
+
+    lines = list(text or [])
+    if lines:
+        font = _font(size // 20)
+
+        dummy_draw = ImageDraw.Draw(qr_img)
+        line_spacing = 6
+        line_measurements = []
+        total_text_height = 0
+        max_text_width = 0
+        for line in lines:
+            bbox = dummy_draw.textbbox((0, 0), line, font=font)
+            w = bbox[2] - bbox[0]
+            h = bbox[3] - bbox[1]
+            line_measurements.append((w, h))
+            max_text_width = max(max_text_width, w)
+            total_text_height += h
+        total_text_height += line_spacing * (len(lines) - 1)
+
+        margin = 16
+        canvas_height = qr_img.height + total_text_height + margin * 2
+        canvas_width = max(qr_img.width, max_text_width + margin * 2)
+
+        canvas = Image.new("RGB", (canvas_width, canvas_height), "white")
+        qr_x = (canvas_width - qr_img.width) // 2
+        canvas.paste(qr_img, (qr_x, 0))
+
+        draw = ImageDraw.Draw(canvas)
+        y = qr_img.height + margin // 2
+        for i, line in enumerate(lines):
+            w, h = line_measurements[i]
+            x = (canvas_width - w) // 2
+            draw.text((x, y), line, fill=text_color, font=font)
+            y += h + line_spacing
+    else:
+        canvas = qr_img
+
+    canvas.save(output)
+    print(f"QR code saved to {output}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Generate QR code with optional logo and text"
+    )
+    parser.add_argument("url", help="URL to encode")
+    parser.add_argument("-o", "--output", default="qr_output.png", help="Output file path")
+    parser.add_argument(
+        "-t",
+        "--text",
+        action="append",
+        help="Text line below QR code (repeat for multiple lines)",
+    )
+    parser.add_argument("-l", "--logo", help="Path to logo image to overlay")
+    parser.add_argument("-s", "--size", type=int, default=400, help="QR code size in pixels")
+    parser.add_argument(
+        "-c",
+        "--color",
+        default="#F97316",
+        help="QR module color (default: #F97316, app orange theme)",
+    )
+    parser.add_argument(
+        "--text-color",
+        default="#F97316",
+        help="Caption text color (default: #F97316, app orange theme)",
+    )
+    args = parser.parse_args()
+
+    generate_qr(
+        args.url, args.output, args.text, args.logo, args.size, args.color, args.text_color
+    )
+
+
+if __name__ == "__main__":
+    main()
