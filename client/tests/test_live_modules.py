@@ -32,6 +32,14 @@ def test_capabilities_match_the_stack(live: Live):
     assert {m: live.caps[m] for m in MODULES} == {m: expected for m in MODULES}
 
 
+def test_capabilities_report_the_stacks_country_code(live: Live):
+    """cli_test.conf sets default_country_code; the modules-off conf sets none (club_server#15)."""
+    assert "defaultCountryCode" in live.caps, live.caps
+    if EXPECT_MODULES is None:
+        pytest.skip("CLUB_EXPECT_MODULES not set; nothing to compare against")
+    assert live.caps["defaultCountryCode"] == ("91" if EXPECT_MODULES == "on" else None)
+
+
 # ── Identity verification (club_server#428, cli #34) ────────────────────
 
 
@@ -64,6 +72,40 @@ def test_member_reaches_active_through_the_stacks_review_flow(live: Live):
     assert live.ok("user", "get", username)["status"] == "pending"
     live.ok("user", "approve", username)
     assert live.ok("user", "get", username)["status"] == "active"
+
+
+def _pending_after_reconsider(live: Live) -> str:
+    """A pending user with an open review request: sent back once, then resubmitted."""
+    username = _register(live)
+    if live.caps["identityVerification"]:
+        live.ok(
+            "me", "gallery", "add-file", str(ID_DOCUMENT), "--tag", "identity_document",
+            user=username, pw=MEMBER_PASSWORD,
+        )
+        live.ok("me", "submit-for-review", user=username, pw=MEMBER_PASSWORD)
+    live.ok("user", "reconsider", username, "--reason", "Please check the phone number")
+    assert live.ok("user", "get", username)["status"] == "registered"
+    live.ok("me", "submit-for-review", user=username, pw=MEMBER_PASSWORD)
+    assert live.ok("user", "get", username)["status"] == "pending"
+    return username
+
+
+@pytest.mark.parametrize("verb, status", [("approve", "active"), ("block", "blocked")])
+def test_review_request_is_closed_with_a_reason(live: Live, verb: str, status: str):
+    """--reason (club_cli#7) reaches the server as resolutionReason.
+
+    No endpoint returns a closed review request, so the note itself cannot
+    be read back here; club_server's own tests assert the stored row. What
+    this proves is that the server reads the field: it accepts a note and
+    applies its 500-character limit to one that is too long.
+    """
+    username = _pending_after_reconsider(live)
+
+    res = live.refused("user", verb, username, "--reason", "x" * 501)
+    assert "resolutionReason" in res.output
+    assert live.ok("user", "get", username)["status"] == "pending"
+
+    assert live.ok("user", verb, username, "--reason", "Phone number confirmed")["status"] == status
 
 
 @pytest.mark.skipif(shutil.which("just") is None, reason="just is not installed")

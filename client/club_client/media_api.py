@@ -56,12 +56,16 @@ class MediaApi:
         url = f"{base_url}/v1/media/by_id/{uuid}/download"
         return f"{url}/{quote(filename)}" if filename else url
 
-    def list_uploads(self, base_url, headers, *, offset, limit, media_type, conversion_status):
-        params: dict[str, str | int] = {"offset": offset, "limit": limit}
+    def list_uploads(
+        self, base_url, headers, *, offset, limit, media_type, conversion_status, include_deleted=False,
+    ):
+        params: dict[str, str | int | bool] = {"offset": offset, "limit": limit}
         if media_type:
             params["mediaType"] = media_type
         if conversion_status:
             params["conversionStatus"] = conversion_status
+        if include_deleted:
+            params["includeDeleted"] = True
         return httpx.get(f"{base_url}/v1/media", params=params, headers=headers)
 
     def get_upload(self, base_url, headers, upload_id):

@@ -46,21 +46,34 @@ CLUB_TEST_CONFS=cli_test.conf:on just test  # one stack only
 just test_to http://127.0.0.1:8400         # a running server, read-only checks
 ```
 
-`just test` runs the suite twice, each time against a fresh club_server
+`just test` needs `just`, `uv`, `jq`, `git` and PostgreSQL installed, and
+nothing else. It runs the suite twice, each time against a fresh club_server
 cloned at `main` by `background_server.sh` from
-[native_deploy](https://github.com/cloudonlanapps/native_deploy), which must
-be on `PATH`:
+[native_deploy](https://github.com/cloudonlanapps/native_deploy):
 `cli_test.conf` has every optional module on (credits, evaluations, event
 marketing, identity verification) and `cli_test_modules_off.conf` has them
 all off. Point a conf's `source` at a local checkout to test uncommitted
 server changes.
+
+`just test` clones native_deploy itself, into `.native_deploy/` (gitignored),
+and brings it up to date on every run. `NATIVE_DEPLOY_REF` selects a branch
+or a commit (default `main`); `NATIVE_DEPLOY_URL` selects another remote or a
+local checkout.
+
+```bash
+NATIVE_DEPLOY_REF=<branch-or-commit> just test
+```
 
 - Most tests are offline: `tests/fakes.py` stands in for `httpx` and checks
   which endpoint each command calls, with what body.
 - `test_endpoint_contract.py` reads the server's `openapi.json` and checks,
   method by method, that every operation the CLI calls exists and that every
   operation the server offers has a command. A new server endpoint fails it
-  until it is wrapped.
+  until it is wrapped. It checks one level down as well: every query
+  parameter an operation takes, and every field of a request body a command
+  builds itself, must be sent by a command, so a new server option fails it
+  until a command has it. What is deliberately not sent is listed in
+  `UNSENT_BY_DESIGN` with its reason.
 - `test_live_*.py` drive the CLI against the server and assert whichever
   mode the stack reports. They create users, events and uploads, so they run
   only with `CLUB_LIVE_WRITES=1`, which `just test` sets and `just test_to`

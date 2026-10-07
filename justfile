@@ -12,11 +12,18 @@ PASS_ENTRY := env_var_or_default("CLUB_PASS_ENTRY", "")
 SEEDS      := env_var_or_default("CLUB_SEEDS", "seeds")
 
 # The client's test suite runs against fresh isolated club_server stacks,
-# started by native_deploy's background_server.sh (expected on PATH) from the
-# confs in this repo, which clone club_server at main. Each entry is
+# started by native_deploy's background_server.sh from the confs in this repo,
+# which clone club_server at main. `just test` clones native_deploy itself,
+# into .native_deploy/ (gitignored); NATIVE_DEPLOY_REF picks a branch or a
+# commit, NATIVE_DEPLOY_URL another remote or a local checkout. Each entry is
 # <conf>:<mode>, mode being what the stack's optional modules are expected to
 # be: the suite runs once with every module on and once with every module off.
 TEST_CONFS := env_var_or_default("CLUB_TEST_CONFS", "cli_test.conf:on cli_test_modules_off.conf:off")
+
+NATIVE_DEPLOY_URL := env_var_or_default("NATIVE_DEPLOY_URL", "https://github.com/cloudonlanapps/native_deploy.git")
+NATIVE_DEPLOY_REF := env_var_or_default("NATIVE_DEPLOY_REF", "main")
+NATIVE_DEPLOY_DIR := justfile_directory() / ".native_deploy"
+BACKGROUND_SERVER := NATIVE_DEPLOY_DIR / "background_server.sh"
 
 default:
     @just --list
@@ -28,17 +35,17 @@ default:
 #   CLUB_TEST_CONFS=cli_test.conf:on just test    # one stack only
 # Run client/tests against fresh isolated servers, one per module mode.
 [positional-arguments]
-test *ARGS:
+test *ARGS: _native-deploy
     #!/usr/bin/env bash
     set -euo pipefail
     run_one() {  # <conf> <on|off> [pytest args...]
         local conf="$1" mode="$2" json base port db_port
         shift 2
-        json=$(background_server.sh "$conf" start --auto-ports)
+        json=$("{{BACKGROUND_SERVER}}" "$conf" start --auto-ports)
         base=$(printf '%s' "$json" | jq -r .host_url)
         port=$(printf '%s' "$json" | jq -r .server_port)
         db_port=$(printf '%s' "$json" | jq -r .db_port)
-        trap 'background_server.sh "'"$conf"'" cleanup port='"$port"' db_port='"$db_port" EXIT
+        trap '"{{BACKGROUND_SERVER}}" "'"$conf"'" cleanup port='"$port"' db_port='"$db_port" EXIT
         echo "==> client tests against $base ($conf, optional modules $mode)"
         # REQUIRE_SERVER: a stack that is not answering fails the run rather
         # than skipping every live test into a green result. LIVE_WRITES: this
@@ -56,6 +63,32 @@ test *ARGS:
         exit 1
     fi
     echo "==> passed against: {{TEST_CONFS}}"
+
+# Internal: clone native_deploy into .native_deploy/ on first use, then bring
+# it to NATIVE_DEPLOY_REF (a branch is taken at its remote head, so every run
+# pulls).
+_native-deploy:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dir="{{NATIVE_DEPLOY_DIR}}"
+    if [ ! -d "$dir/.git" ]; then
+        # Clone beside the target and rename, so concurrent runs never see a
+        # half-written clone; the loser of the rename drops its copy.
+        tmp=$(mktemp -d "$dir.XXXXXX")
+        trap 'rm -rf "$tmp"' EXIT
+        echo "==> cloning {{NATIVE_DEPLOY_URL}} into $dir" >&2
+        git clone --quiet "{{NATIVE_DEPLOY_URL}}" "$tmp/clone" >&2
+        mv -T "$tmp/clone" "$dir" 2>/dev/null || [ -d "$dir/.git" ]
+    fi
+    git -C "$dir" remote set-url origin "{{NATIVE_DEPLOY_URL}}"
+    git -C "$dir" fetch --quiet --prune origin >&2
+    want=$(git -C "$dir" rev-parse --verify --quiet "origin/{{NATIVE_DEPLOY_REF}}^{commit}") \
+        || want=$(git -C "$dir" rev-parse --verify "{{NATIVE_DEPLOY_REF}}^{commit}")
+    if [ "$(git -C "$dir" rev-parse HEAD)" != "$want" ]; then
+        git -C "$dir" checkout --quiet --detach "$want" >&2
+        echo "==> native_deploy at $(git -C "$dir" rev-parse --short HEAD) ({{NATIVE_DEPLOY_REF}})" >&2
+    fi
+    [ -x "{{BACKGROUND_SERVER}}" ] || { echo "ERROR: {{BACKGROUND_SERVER}} is missing." >&2; exit 1; }
 
 #   just test_to http://127.0.0.1:8400     # an already running server
 # Run client/tests against a running server. Only the

@@ -10,11 +10,20 @@ single failing test.
 These tests read the live schema and compare it against the call sites,
 method by method: a path the CLI reads with GET says nothing about the PATCH
 next to it.
+
+A command can call the right endpoint and still leave out what the endpoint
+takes: `users list` reached GET /v1/users for months without the role filter,
+the search term or the sort order (club_cli#6). So the second half of this
+file goes one level down: every query parameter an operation takes, and every
+field of a request body a command builds itself, must be sent by a command.
 """
 from __future__ import annotations
 
+import ast
 import collections
+import functools
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
@@ -43,6 +52,21 @@ UNCOVERED_BY_DESIGN = {
 # CLI covers it), so nothing here can quietly become permanent.
 CLAIMED_BY_OPEN_ISSUES: set[tuple[str, str]] = set()
 
+# Query parameters and body fields no command sends, each with its reason:
+# (method, path, name). A request the CLI wraps in full has no entry here.
+UNSENT_BY_DESIGN: dict[tuple[str, str, str], str] = {
+    # The download handler also serves `/download/{filename}`, where the
+    # filename is a path segment; on the plain path the same argument shows
+    # up as a query parameter. It is decorative on both (club_server#424).
+    ("GET", "/v1/media/by_id/{}/download", "filename"): "decorative filename of the alias route",
+    ("HEAD", "/v1/media/by_id/{}/download", "filename"): "decorative filename of the alias route",
+}
+
+# Parameters and fields an open issue already owns an option for, each naming
+# its issue. The entry goes when the issue lands (a test below fails once a
+# command sends it), so nothing here can quietly become permanent.
+PARAMETERS_CLAIMED_BY_OPEN_ISSUES: dict[tuple[str, str, str], str] = {}
+
 VERBS = ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE")
 ANY = "*"
 
@@ -61,16 +85,21 @@ def _matches(call_site: str, server: str) -> bool:
 
 
 @pytest.fixture(scope="module")
-def server_ops() -> set[tuple[str, str]]:
+def server_schema() -> dict:
     try:
         r = httpx.get(f"{BASE_URL}/openapi.json", timeout=15)
     except httpx.HTTPError as exc:
         unavailable(f"server schema unreachable at {BASE_URL}: {exc}")
     if r.status_code != 200:
         unavailable(f"server schema returned {r.status_code}")
+    return r.json()
+
+
+@pytest.fixture(scope="module")
+def server_ops(server_schema: dict) -> set[tuple[str, str]]:
     return {
         (method.upper(), _normalise(path))
-        for path, item in r.json()["paths"].items()
+        for path, item in server_schema["paths"].items()
         for method in item
         if method.upper() in VERBS
     }
@@ -135,6 +164,7 @@ def _url_helpers(text: str) -> dict[str, tuple[int, list[str]]]:
     return helpers
 
 
+@functools.cache
 def _call_sites() -> dict[tuple[str, str], list[str]]:
     """Every endpoint the client source calls, as (method, path) → sites.
 
@@ -248,4 +278,294 @@ def test_skip_lists_name_only_operations_the_server_serves(server_ops: set[tuple
     )
     assert not gone, "listed as uncovered but the server no longer serves it:\n" + "\n".join(
         f"  {m} {p}" for m, p in gone
+    )
+
+
+# ── Parameters and body fields ──────────────────────────────────────────
+#
+# A call site is one line; what the request carries is decided by the command
+# around it. Each call site is placed in its function, each function in the
+# commands that run it, and a command is taken to send every name it writes
+# as a string: the key of a dict, `params["name"]`, a ("name", value) pair in
+# a loop, or a keyword handed to `.update()` or to a helper taking **fields.
+# A name only read (`media["filename"]`, `data.get("status")`) is not sent.
+# That still reads a little more than it should (a name written for any
+# other reason counts as sent), which errs toward passing;
+# `test_parameter_scanner_sees_what_commands_send` pins what it must see and
+# must not.
+
+# Functions that hand the caller's own JSON to the server. A body built this
+# way carries whatever the user wrote, so its fields are not checked.
+PASSES_JSON_THROUGH = {"parse_json_input", "_parse_preference_value"}
+
+
+@dataclass
+class _Function:
+    file: str
+    name: str
+    first_line: int
+    last_line: int
+    written: set[str] = field(default_factory=set)
+    calls: set[str] = field(default_factory=set)
+    takes_any_keyword: bool = False
+    click: tuple[str, str, str] | None = None  # ("command" | "group", parent's function, name)
+
+    @property
+    def passes_json_through(self) -> bool:
+        return bool(self.calls & PASSES_JSON_THROUGH)
+
+
+def _read_function(file: str, node: ast.FunctionDef) -> _Function:
+    fn = _Function(file, node.name, node.lineno, node.end_lineno or node.lineno)
+    fn.takes_any_keyword = node.args.kwarg is not None
+    for dec in node.decorator_list:
+        if (
+            isinstance(dec, ast.Call) and isinstance(dec.func, ast.Attribute)
+            and dec.func.attr in ("command", "group") and isinstance(dec.func.value, ast.Name)
+        ):
+            named = dec.args[0].value if dec.args and isinstance(dec.args[0], ast.Constant) else None
+            fn.click = (dec.func.attr, dec.func.value.id, named or node.name.replace("_", "-"))
+    docstring = node.body[0].value if ast.get_docstring(node) is not None else None
+    in_fstring = {id(part) for n in ast.walk(node) if isinstance(n, ast.JoinedStr) for part in ast.walk(n)}
+    # `x["name"]` read, `x.get("name")`, `x.pop("name")`: looked up, not sent.
+    read_only = {
+        id(n.slice) for n in ast.walk(node)
+        if isinstance(n, ast.Subscript) and isinstance(n.ctx, ast.Load)
+    } | {
+        id(n.args[0]) for n in ast.walk(node)
+        if isinstance(n, ast.Call) and getattr(n.func, "attr", None) in ("get", "pop") and n.args
+    }
+    keyword_calls: list[tuple[str, list[str]]] = []
+    for body_node in node.body:
+        for n in ast.walk(body_node):
+            if (
+                isinstance(n, ast.Constant) and isinstance(n.value, str) and n is not docstring
+                and id(n) not in in_fstring and id(n) not in read_only
+            ):
+                fn.written.add(n.value)
+            elif isinstance(n, ast.Call):
+                callee = n.func.id if isinstance(n.func, ast.Name) else getattr(n.func, "attr", None)
+                if callee:
+                    fn.calls.add(callee)
+                    keyword_calls.append((callee, [k.arg for k in n.keywords if k.arg]))
+    fn._keyword_calls = keyword_calls  # type: ignore[attr-defined]
+    return fn
+
+
+@functools.cache
+def _functions() -> dict[str, list[_Function]]:
+    """Every function in the client source, by name."""
+    found: dict[str, list[_Function]] = collections.defaultdict(list)
+    for file in CLIENT_ROOT.rglob("*.py"):
+        if "tests" in file.parts or ".venv" in file.parts:
+            continue
+        rel = str(file.relative_to(CLIENT_ROOT))
+        for node in ast.walk(ast.parse(file.read_text())):
+            if isinstance(node, ast.FunctionDef):
+                found[node.name].append(_read_function(rel, node))
+    # A keyword counts as written when it lands in a dict: `.update(a=1)`,
+    # `dict(a=1)`, or a helper that takes **fields and builds the params.
+    for fns in list(found.values()):
+        for fn in fns:
+            for callee, keywords in fn._keyword_calls:  # type: ignore[attr-defined]
+                if callee in ("update", "dict") or any(t.takes_any_keyword for t in found.get(callee, [])):
+                    fn.written.update(keywords)
+    return found
+
+
+def _command_name(fn: _Function) -> str:
+    """`users list`, `event marketing set`: the words a user types."""
+    assert fn.click is not None
+    _, parent, name = fn.click
+    if parent == "main":
+        return name
+    (owner,) = [f for f in _functions()[parent] if f.file == fn.file and f.click]
+    return f"{_command_name(owner)} {name}"
+
+
+@dataclass
+class _Sender:
+    """One command that reaches an operation, and what it writes on the way."""
+    command: str
+    written: set[str]
+    passes_json_through: bool
+
+
+def _senders(where: str) -> list[_Sender]:
+    """The commands behind a call site (`cli.py:812`).
+
+    The line sits in a command, or in a helper (`MediaApi.list_uploads`)
+    that commands call; each command is read together with the helpers it
+    calls, since either may be the one that names a parameter.
+    """
+    functions = _functions()
+    file, line = where.rsplit(":", 1)
+    inside = [
+        f for fns in functions.values() for f in fns
+        if f.file == file and f.first_line <= int(line) <= f.last_line
+    ]
+    if not inside:
+        return []
+    start = max(inside, key=lambda f: f.first_line)
+
+    commands: list[_Function] = []
+    seen: set[int] = set()
+    todo = [start]
+    while todo:
+        fn = todo.pop()
+        if id(fn) in seen:
+            continue
+        seen.add(id(fn))
+        if fn.click and fn.click[0] == "command":
+            commands.append(fn)
+        elif not fn.click:
+            todo += [f for fns in functions.values() for f in fns if fn.name in f.calls]
+
+    senders = []
+    for command in commands:
+        run: list[_Function] = []
+        todo = [command]
+        while todo:
+            fn = todo.pop()
+            if fn in run:
+                continue
+            run.append(fn)
+            todo += [t for callee in fn.calls for t in functions.get(callee, []) if not t.click]
+        senders.append(_Sender(
+            _command_name(command),
+            set().union(*(f.written for f in run)),
+            any(f.passes_json_through for f in run),
+        ))
+    return senders
+
+
+def _body_fields(schema: dict, operation: dict) -> list[str]:
+    """Top-level fields of the operation's request body, JSON or form."""
+    def resolve(node: dict | None) -> dict:
+        if not node:
+            return {}
+        if "$ref" in node:
+            return resolve(schema["components"]["schemas"][node["$ref"].split("/")[-1]])
+        for alternative in node.get("anyOf", []):
+            resolved = resolve(alternative)
+            if resolved.get("properties"):
+                return resolved
+        return node
+
+    fields: list[str] = []
+    for content in (operation.get("requestBody") or {}).get("content", {}).values():
+        fields += [name for name in resolve(content.get("schema")).get("properties", {}) if name not in fields]
+    return fields
+
+
+@dataclass
+class _Parameter:
+    method: str
+    path: str  # normalised
+    name: str
+    kind: str  # "query parameter" | "body field"
+    commands: list[str]
+    sent: bool
+
+    @property
+    def key(self) -> tuple[str, str, str]:
+        return (self.method, self.path, self.name)
+
+
+def _parameters(schema: dict) -> list[_Parameter]:
+    """Every query parameter and built-body field the server takes, and whether a command sends it.
+
+    Several commands may reach one operation (`uploads add-file` and `media
+    attach` both post a file); a parameter is sent when any of them sends it.
+    """
+    sites = _call_sites()
+    found: list[_Parameter] = []
+    for raw_path, item in schema["paths"].items():
+        for verb, operation in item.items():
+            method, path = verb.upper(), _normalise(raw_path)
+            if method not in VERBS:
+                continue
+            senders = {
+                sender.command: sender
+                for site, wheres in sites.items() if _covers(site, (method, path))
+                for where in wheres
+                for sender in _senders(where)
+            }
+            if not senders:
+                continue  # no command at all: the path tests above report that
+            written = set().union(*(s.written for s in senders.values()))
+            commands = sorted(senders)
+            for parameter in operation.get("parameters", []):
+                if parameter["in"] == "query":
+                    name = parameter["name"]
+                    found.append(_Parameter(method, path, name, "query parameter", commands, name in written))
+            if not any(s.passes_json_through for s in senders.values()):
+                for name in _body_fields(schema, operation):
+                    found.append(_Parameter(method, path, name, "body field", commands, name in written))
+    return found
+
+
+def _skipped_parameters() -> dict[tuple[str, str, str], str]:
+    return {
+        (m, _normalise(p), name): why
+        for (m, p, name), why in (*UNSENT_BY_DESIGN.items(), *PARAMETERS_CLAIMED_BY_OPEN_ISSUES.items())
+    }
+
+
+def test_parameter_scanner_sees_what_commands_send(server_schema: dict) -> None:
+    """Guard the scanner itself: one that reads everything as sent, or nothing, proves nothing."""
+    parameters = {(p.method, p.path, p.name): p for p in _parameters(server_schema)}
+    queries = [p for p in parameters.values() if p.kind == "query parameter"]
+    fields = [p for p in parameters.values() if p.kind == "body field"]
+    assert len(queries) > 100, f"only {len(queries)} query parameters were placed in a command"
+    assert len(fields) > 50, f"only {len(fields)} body fields were placed in a command"
+
+    def sent(method: str, path: str, name: str) -> bool:
+        return parameters[(method, _normalise(path), name)].sent
+
+    # A dict literal, a ("name", value) loop, a helper taking **fields, a
+    # helper class in another file, and a body built from options.
+    assert sent("GET", "/v1/users", "limit")
+    assert sent("GET", "/v1/audit_log", "resource_type")
+    assert sent("GET", "/v1/credits/entries", "entryType")
+    assert sent("GET", "/v1/media", "conversionStatus")
+    assert sent("PATCH", "/v1/notifications/preferences", "pushEnabled")
+    # Not sent, and listed as such.
+    assert not sent("GET", "/v1/media/by_id/{}/download", "filename")
+    # A command that passes the user's JSON through has no fields to check.
+    assert ("POST", "/v1/events", "title") not in parameters
+    # The failure message can name the command.
+    assert parameters[("GET", "/v1/users/deleted", "limit")].commands == ["trash list"]
+    assert "uploads add-file" in parameters[("POST", "/v1/media", "encrypt")].commands
+
+
+def test_every_parameter_and_built_body_field_is_sent(server_schema: dict) -> None:
+    """The CLI wraps every option the server offers, not only every endpoint."""
+    skipped = _skipped_parameters()
+    missing = [p for p in _parameters(server_schema) if not p.sent and p.key not in skipped]
+    assert not missing, (
+        "the server takes these and no command sends them (add an option, or add to "
+        "UNSENT_BY_DESIGN with a reason):\n" + "\n".join(
+            f"  {p.method} {p.path}: {p.kind} `{p.name}` is not sent by "
+            + " / ".join(f"`{c}`" for c in p.commands)
+            for p in sorted(missing, key=lambda p: (p.path, p.method, p.name))
+        )
+    )
+
+
+def test_parameter_skip_lists_hold_only_unsent_parameters(server_schema: dict) -> None:
+    """An entry a command now sends must be removed, so the lists never go stale."""
+    skipped = _skipped_parameters()
+    sent = sorted(p.key for p in _parameters(server_schema) if p.sent and p.key in skipped)
+    assert not sent, "listed as unsent but a command sends it:\n" + "\n".join(
+        f"  {m} {p}: {name}" for m, p, name in sent
+    )
+
+
+def test_parameter_skip_lists_name_only_parameters_the_server_takes(server_schema: dict) -> None:
+    """An entry the server has dropped must go too, so the list cannot rot."""
+    known = {p.key for p in _parameters(server_schema)}
+    gone = sorted(key for key in _skipped_parameters() if key not in known)
+    assert not gone, "listed as unsent but the server no longer takes it:\n" + "\n".join(
+        f"  {m} {p}: {name}" for m, p, name in gone
     )

@@ -21,8 +21,6 @@ TIMESTAMP_FIELD_MAP = {
     "startTime": "startTimeUtc",
     "endTime": "endTimeUtc",
     "untilTime": "untilTimeUtc",
-    "dobOnOrAfter": "dobOnOrAfterUtc",
-    "dobOnOrBefore": "dobOnOrBeforeUtc",
     "effectiveTime": "effectiveTimeUtc",
     "expiresAt": "expiresAtUtc",
     "validFrom": "validFromUtc",
@@ -89,6 +87,55 @@ def convert_timestamps(data: dict[str, Any]) -> dict[str, Any]:
             result[api_key] = local_iso_to_utc_ms(value)
         else:
             result[key] = value
+    return result
+
+
+# Eligibility on events and groups is an age band (club_server#16). The two
+# date-of-birth bounds are what the server works out from it, and it refuses
+# them on a write.
+AGE_FIELDS = ("minAge", "maxAge")
+REMOVED_DOB_FIELDS = ("dobOnOrAfter", "dobOnOrBefore", "dobOnOrAfterUtc", "dobOnOrBeforeUtc")
+
+# Shared by the event and group write commands' help.
+AGE_BAND_HELP = """Eligibility by age: minAge and maxAge are each {"years", "months", "days"}
+    (years 0-150, months 0-11, days 0-30; months and days default to 0), or
+    a whole number of years; null clears the bound. strictAge true admits
+    ages exactly minAge to maxAge on the reference day; false (the default)
+    widens each end by a year less a day. minAge above maxAge is refused
+    (422 INVALID_STATE). The date-of-birth window is worked out by the
+    server and cannot be written."""
+
+# Shared by the event and group read commands' help.
+AGE_WINDOW_HELP = """Eligibility: minAge and maxAge ({years, months, days}, or null for no
+    bound) and strictAge are the age band as set. eligibilityReferenceDayUtc
+    is the day ages are counted on, and dobOnOrAfterUtc / dobOnOrBeforeUtc
+    are the dates of birth the band comes to on that day, both inclusive."""
+
+
+def age_help(command):
+    """Fill {AGE_BAND_HELP} / {AGE_WINDOW_HELP} in a command's docstring.
+
+    Goes directly above the `def`, so the text is in place before click reads it.
+    """
+    command.__doc__ = (
+        command.__doc__.replace("{AGE_BAND_HELP}", AGE_BAND_HELP).replace("{AGE_WINDOW_HELP}", AGE_WINDOW_HELP)
+    )
+    return command
+
+
+def convert_age_band(data: dict[str, Any]) -> dict[str, Any]:
+    """Refuse the removed date-of-birth bounds; send a bare number of years as an age."""
+    for field in REMOVED_DOB_FIELDS:
+        if field in data:
+            raise click.ClickException(
+                f"{field!r} is removed: eligibility is an age band. Use minAge / maxAge "
+                "/ strictAge (see --help)."
+            )
+    result = dict(data)
+    for field in AGE_FIELDS:
+        value = result.get(field)
+        if isinstance(value, int) and not isinstance(value, bool):
+            result[field] = {"years": value}
     return result
 
 
@@ -229,6 +276,15 @@ def explain_error(data: Any) -> str | None:
     return f"{code}: {hint}"
 
 
+# Shared by the commands that upload a file (club_server#18).
+OWNER_OPTION_HELP = (
+    "Upload on behalf of this user. Admins only; anyone else may name only "
+    "themselves. The file is recorded as theirs: they are who `self` means "
+    "in its access roles, they may change or delete it, and it shows in "
+    "their own file listing."
+)
+
+
 def _echo_media_type(media: dict) -> None:
     """Say what the uploaded file actually is, on stderr (club_server#424).
 
@@ -339,12 +395,15 @@ def main(
 @main.command("capabilities")
 @pass_context
 def capabilities(ctx: Context):
-    """What this deployment can do: {creditSystem, evaluations, eventMarketing, identityVerification}.
+    """What this deployment can do: {creditSystem, evaluations, eventMarketing, identityVerification, defaultCountryCode}.
 
     Anyone may ask, before login too. The optional modules' routes exist on
     every deployment and answer 503 while off, so this is the way to find out.
     identityVerification false means registration lands in pending, with no
     identity document to upload before review.
+    defaultCountryCode is the club's country calling code, one to three
+    digits without "+" (e.g. "91"): the club apps put it in front of a phone
+    number typed without one. It is null when the deployment sets none.
 
     Example: capabilities
     """
@@ -777,16 +836,58 @@ def users_create(ctx: Context, json_input: str, guest: bool) -> None:
     print_response(response)
 
 
+ROLE_CHOICE = click.Choice(["admin", "coach"])
+USER_SORT_CHOICE = click.Choice(["username", "firstName", "lastName"])
+
+
 @users.command("list")
 @click.option("--status", "status_filter", help="Filter by status: registered, pending, active, blocked, left")
+@click.option("--role", type=ROLE_CHOICE, help="Only users holding this role: admin, coach")
+@click.option("--search", "search_term", help="Only users whose username, first name, last name, nickname or email contains this text (any case)")
+@click.option("--sort-by", type=USER_SORT_CHOICE, help="Sort by this field (default: creation time)")
+@click.option("--descending", is_flag=True, default=False, help="Reverse the sort: Z to A, or newest first when sorting by creation time")
+@click.option("--min-age", type=click.IntRange(min=0), help="Only users at least this many years old today")
+@click.option("--max-age", type=click.IntRange(min=0), help="Only users at most this many years old today")
 @click.option("--offset", default=0, help="Pagination offset")
 @click.option("--limit", default=20, help="Pagination limit")
 @pass_context
-def users_list(ctx: Context, status_filter: str | None, offset: int, limit: int) -> None:
-    """List all users (admin only)."""
-    params: dict[str, str | int] = {"offset": offset, "limit": limit}
+def users_list(
+    ctx: Context,
+    status_filter: str | None,
+    role: str | None,
+    search_term: str | None,
+    sort_by: str | None,
+    descending: bool,
+    min_age: int | None,
+    max_age: int | None,
+    offset: int,
+    limit: int,
+) -> None:
+    """List all users (admin only).
+
+    Without --status, registered users (signed up, not yet submitted for
+    review) are left out. Filters combine: every one given must match. A
+    user with no date of birth matches neither age filter.
+
+    Example: users list --role coach --sort-by lastName
+    Example: users list --search ann --min-age 10 --max-age 14
+    Example: users list --descending
+    """
+    params: dict[str, str | int | bool] = {"offset": offset, "limit": limit}
     if status_filter:
         params["status"] = status_filter
+    if role:
+        params["role"] = role
+    if search_term:
+        params["searchTerm"] = search_term
+    if sort_by:
+        params["sortBy"] = sort_by
+    if descending:
+        params["descending"] = True
+    if min_age is not None:
+        params["minAge"] = min_age
+    if max_age is not None:
+        params["maxAge"] = max_age
     response = httpx.get(
         f"{ctx.base_url}/v1/users",
         params=params,
@@ -839,13 +940,32 @@ def user_update(ctx: Context, username: str, json_input: str):
     print_response(response)
 
 
+# Shared by `user approve` and `user block`.
+RESOLUTION_REASON_HELP = (
+    "Optional. Saved as the closing note on the user's open review request "
+    "(the one `user reconsider` opened); up to 500 characters. With no open "
+    "request there is nothing to attach it to and it is not kept."
+)
+
+
+def resolution_body(reason: str | None) -> dict[str, str] | None:
+    """The body `approve` and `block` take, or none when no reason is given."""
+    return {"resolutionReason": reason} if reason else None
+
+
 @user.command("block")
 @click.argument("username")
+@click.option("--reason", help=RESOLUTION_REASON_HELP)
 @pass_context
-def user_block(ctx: Context, username: str):
-    """Block a user."""
+def user_block(ctx: Context, username: str, reason: str | None):
+    """Block a user.
+
+    Example: user block alice
+    Example: user block alice --reason "Duplicate of alice2"
+    """
     response = httpx.post(
         f"{ctx.base_url}/v1/users/by_id/{username}/block",
+        json=resolution_body(reason),
         headers=ctx.headers,
     )
     print_response(response)
@@ -865,11 +985,17 @@ def user_delete(ctx: Context, username: str):
 
 @user.command("approve")
 @click.argument("username")
+@click.option("--reason", help=RESOLUTION_REASON_HELP)
 @pass_context
-def user_approve(ctx: Context, username: str):
-    """Approve a pending user (admin, pending → active)."""
+def user_approve(ctx: Context, username: str, reason: str | None):
+    """Approve a pending user (admin, pending → active).
+
+    Example: user approve alice
+    Example: user approve alice --reason "Phone number confirmed"
+    """
     response = httpx.post(
         f"{ctx.base_url}/v1/users/by_id/{username}/approve",
+        json=resolution_body(reason),
         headers=ctx.headers,
     )
     print_response(response)
@@ -929,9 +1055,6 @@ def user_reactivate(ctx: Context, username: str):
 
 
 # Super admin is a flag moved only by transfer-superadmin, never a role (club_server#514).
-ROLE_CHOICE = click.Choice(["admin", "coach"])
-
-
 @user.command("add-role")
 @click.argument("username")
 @click.argument("role", type=ROLE_CHOICE)
@@ -986,20 +1109,25 @@ def user_groups(ctx: Context, username: str):
 @events.command("create")
 @click.argument("json_input")
 @pass_context
+@age_help
 def events_create(ctx: Context, json_input: str):
     """Create a new event from JSON file or inline JSON.
 
     EventCreate now carries: title, description, type, visibility, venueId,
     organizerName, coachNames, startTime, endTime, rrule, untilTime, gender,
-    dobOnOrAfter, dobOnOrBefore, isFeatured, imageUri, galleryUris, sessions.
+    minAge, maxAge, strictAge, isFeatured, imageUri, galleryUris, sessions.
     Legacy auxInfo is no longer supported.
+
+    {AGE_BAND_HELP}
+
+    Example: events create '{"title": "U12 Camp", "type": "camp", "venueId": 1, "startTime": "2026-07-01T06:00:00", "endTime": "2026-07-01T08:00:00", "minAge": 10, "maxAge": {"years": 12, "months": 6}, "strictAge": true}'
     """
     data = parse_json_input(json_input)
     if "auxInfo" in data:
         raise click.ClickException(
-            "auxInfo is removed; move imageUri/isFeatured/galleryUris/sessions/gender/dobOnOrAfter/dobOnOrBefore to top-level event fields."
+            "auxInfo is removed; move imageUri/isFeatured/galleryUris/sessions/gender/minAge/maxAge/strictAge to top-level event fields."
         )
-    data = convert_timestamps(data)
+    data = convert_timestamps(convert_age_band(data))
     response = httpx.post(
         f"{ctx.base_url}/v1/events",
         json=data,
@@ -1013,19 +1141,38 @@ def events_create(ctx: Context, json_input: str):
 @click.option("--visibility", help="Filter by visibility: public, private")
 @click.option("--organizer", help="Filter by organizer username")
 @click.option("--include-past", is_flag=True, help="Include past events")
+@click.option("--from", "from_time", help="Only events still running at or after this time (local ISO or 'YYYYMMDD HHMM')")
+@click.option("--to", "to_time", help="Only events starting at or before this time (local ISO or 'YYYYMMDD HHMM')")
+@click.option("--venue-id", type=int, help="Only events at this venue")
 @click.option("--offset", default=0, help="Pagination offset")
 @click.option("--limit", default=20, help="Pagination limit")
 @pass_context
+@age_help
 def events_list(
     ctx: Context,
     event_type: str | None,
     visibility: str | None,
     organizer: str | None,
     include_past: bool,
+    from_time: str | None,
+    to_time: str | None,
+    venue_id: int | None,
     offset: int,
     limit: int,
 ):
-    """List events with optional filters."""
+    """List events with optional filters.
+
+    --from keeps an event that starts at or after the time, or runs up to
+    it or beyond (an open-ended programme always does); --to keeps one that
+    starts at or before the time.
+
+    Example: events list --type camp --from "2026-07-01T00:00:00" --to "2026-07-31T23:59:00"
+    Example: events list --venue-id 4
+
+    {AGE_WINDOW_HELP}
+    The reference day is the day a camp or one-off starts, and a programme's
+    next occurrence that is not cancelled (today when it has none).
+    """
     params: dict[str, str | int | bool] = {"offset": offset, "limit": limit, "includePast": include_past}
     if event_type:
         params["type"] = event_type
@@ -1033,6 +1180,12 @@ def events_list(
         params["visibility"] = visibility
     if organizer:
         params["organizerName"] = organizer
+    if from_time:
+        params["fromTimeUtc"] = local_iso_to_utc_ms(parse_local_time(from_time))
+    if to_time:
+        params["toTimeUtc"] = local_iso_to_utc_ms(parse_local_time(to_time))
+    if venue_id is not None:
+        params["venueId"] = venue_id
     response = httpx.get(
         f"{ctx.base_url}/v1/events",
         params=params,
@@ -1089,11 +1242,17 @@ def event_check_user_conflicts(ctx: Context, event_id: int, usernames: tuple[str
 @event.command("get")
 @click.argument("event_id", type=int)
 @pass_context
+@age_help
 def event_get(ctx: Context, event_id: int):
     """Get event details by ID.
 
-    Response now includes gender, dobOnOrAfterUtc, dobOnOrBeforeUtc, isFeatured,
-    imageUri, galleryUris, sessions inline (the aux-info endpoint is gone).
+    Response includes gender, isFeatured, imageUri, galleryUris and sessions
+    inline (the aux-info endpoint is gone).
+
+    {AGE_WINDOW_HELP}
+    The reference day is the day a camp or one-off starts, and a programme's
+    next occurrence that is not cancelled (today when it has none), so a
+    programme's window moves forward.
     """
     response = httpx.get(
         f"{ctx.base_url}/v1/events/by_id/{event_id}",
@@ -1162,6 +1321,7 @@ def patch_event(ctx: Context, event_id: int, suffix: str, data: dict[str, Any]) 
 @click.option("--reset-overrides", is_flag=True, default=False, help="Camp / one-off reschedule: discard per-occurrence overrides that would otherwise block it.")
 @click.option("--version", "version", type=int, help="Event version to send (default: read from the event).")
 @pass_context
+@age_help
 def event_update(
     ctx: Context,
     event_id: int,
@@ -1179,8 +1339,8 @@ def event_update(
 
     \b
     Programme:
-      metadata (title, description, visibility, gender, dobOnOrAfter,
-      dobOnOrBefore, isFeatured, galleryUris, shortDescription, stamp,
+      metadata (title, description, visibility, gender, minAge, maxAge,
+      strictAge, isFeatured, galleryUris, shortDescription, stamp,
       highlights, includes)                → PATCH .../correction
       sessions alone                       → PATCH .../correction, in place,
                                              no cutoff; --schedule-id picks
@@ -1198,7 +1358,11 @@ def event_update(
     When both kinds are present the PATCH goes first and the second call
     follows it. If the second fails, the first has already been applied.
 
+    {AGE_BAND_HELP}
+
     Example: event update 123 '{"title": "New Title"}'
+    Example: event update 123 '{"minAge": 10, "maxAge": {"years": 12, "months": 6}, "strictAge": true}'
+    Example: event update 123 '{"maxAge": null}'
     Example: event update 123 '{"coachNames": ["coach_a"]}' --effective-time-local "2026-06-01T06:00:00"
     Example: event update 123 '{"sessions": [...]}' --schedule-id 4
     Example: event update 123 '{"startTime": "2026-07-01T06:00:00", "endTime": "2026-07-05T08:00:00"}'
@@ -1210,10 +1374,10 @@ def event_update(
     data = parse_json_input(json_input)
     if "auxInfo" in data:
         raise click.ClickException(
-            "auxInfo is removed; move imageUri/isFeatured/galleryUris/sessions/gender/dobOnOrAfter/dobOnOrBefore to top-level event fields."
+            "auxInfo is removed; move imageUri/isFeatured/galleryUris/sessions/gender/minAge/maxAge/strictAge to top-level event fields."
         )
     data.pop("version", None)
-    data = convert_timestamps(data)
+    data = convert_timestamps(convert_age_band(data))
     if not data:
         raise click.ClickException("Nothing to update: the JSON has no event fields.")
 
@@ -1462,10 +1626,11 @@ def event_reinstate(ctx: Context, event_id: int, version: int | None):
 @click.argument("json_input")
 @click.option("--version", "version", type=int, help="Event version to send (default: read from the event).")
 @pass_context
+@age_help
 def event_correct(ctx: Context, event_id: int, json_input: str, version: int | None):
     """Correct what a programme is, across all its occurrences (PATCH .../correction).
 
-    Fields: title, description, visibility, gender, dobOnOrAfter, dobOnOrBefore,
+    Fields: title, description, visibility, gender, minAge, maxAge, strictAge,
     isFeatured, galleryUris, shortDescription, stamp, highlights, includes,
     and sessions with an optional scheduleId: the named schedule's timetable
     (default the latest) is replaced in place, at any time, and must fit that
@@ -1474,7 +1639,10 @@ def event_correct(ctx: Context, event_id: int, json_input: str, version: int | N
     come from `event schedules`.
     Coaching is a timetable change: use `event update ... --effective-time-local`.
 
+    {AGE_BAND_HELP}
+
     Example: event correct 123 '{"title": "Updated Title"}'
+    Example: event correct 123 '{"minAge": 8, "maxAge": null}'
     Example: event correct 123 '{"isFeatured": true, "gender": "female"}' --version 4
     Example: event correct 123 '{"sessions": [...], "scheduleId": 2}'
     """
@@ -1485,7 +1653,7 @@ def event_correct(ctx: Context, event_id: int, json_input: str, version: int | N
             "`event update <id> '{\"coachNames\": [...]}' --effective-time-local ...`."
         )
     data.pop("version", None)
-    data = convert_timestamps(data)
+    data = convert_timestamps(convert_age_band(data))
     data["version"] = resolve_version(ctx, event_id, version)
     print_response(patch_event(ctx, event_id, "/correction", data))
 
@@ -2010,16 +2178,34 @@ def enrollment():
     pass
 
 
+ENROLLMENT_STATUS_CHOICE = click.Choice([
+    "invited", "requested", "accepted", "rejected", "assigned", "assignedTrial",
+    "withdrawn", "withdrawRequested", "declined", "removed",
+])
+
+
 @enrollment.command("list")
 @click.argument("event_id", type=int)
+@click.option("--status", "status_filter", type=ENROLLMENT_STATUS_CHOICE, help="Only enrollments in this status")
 @pass_context
-def enrollment_list(ctx: Context, event_id: int):
-    """List enrollments for an event.
+def enrollment_list(ctx: Context, event_id: int, status_filter: str | None):
+    """List enrollments for an event: {enrollments, records}.
+
+    enrollments maps each membername to a status; records carries the full
+    rows. A row's eligible is false while the member is enrolled (accepted,
+    assigned, assignedTrial, withdrawRequested) and no longer meets the
+    event's gender or age window, worked out when read; it is true for
+    every other row. Nobody is removed automatically. For a programme with
+    a live occurrence, admins get the notification
+    enrollment.member_ineligible once a day for each member who has newly
+    stopped matching; camps and one-offs are not scanned.
 
     Example: enrollment list 5
+    Example: enrollment list 5 --status assignedTrial
     """
     response = httpx.get(
         f"{ctx.base_url}/v1/events/by_id/{event_id}/enrollments",
+        params={"status": status_filter} if status_filter else None,
         headers=ctx.headers,
     )
     print_response(response)
@@ -2468,6 +2654,11 @@ def myevents_schedules(ctx: Context, event_id: int):
 def myevents_enrollment(ctx: Context, event_id: int):
     """Get my enrollment status for an event.
 
+    eligible is false while I am enrolled (accepted, assigned,
+    assignedTrial, withdrawRequested) and no longer meets the event's gender
+    or age window, worked out when read; true otherwise. Nobody is removed
+    automatically.
+
     Example: myevents enrollment 5
     """
     response = httpx.get(
@@ -2654,6 +2845,7 @@ def credits_list(
 @click.option("--account-id", help="Filter by account code")
 @click.option("--event-id", type=int, help="Filter by programme")
 @click.option("--entry-type", help="grant, grantReversal, sessionDeduction, sessionRefund, penalty, transferOut, transferIn, validityExtended")
+@click.option("--occurrence", "occurrence_time_local", help="Entries for the occurrence that starts at this local time (local ISO or 'YYYYMMDD HHMM'): its deductions and refunds")
 @click.option("--from", "from_local", help="Entries created at or after this local time")
 @click.option("--to", "to_local", help="Entries created before this local time")
 @click.option("--order", type=click.Choice(["asc", "desc"]), help="Oldest first (asc) or newest first (desc); omitted, the server's default (asc)")
@@ -2666,6 +2858,7 @@ def credits_entries(
     account_id: str | None,
     event_id: int | None,
     entry_type: str | None,
+    occurrence_time_local: str | None,
     from_local: str | None,
     to_local: str | None,
     order: str | None,
@@ -2682,10 +2875,14 @@ def credits_entries(
     Neither depends on the filters or page asked for.
 
     Example: credits entries --account-id AB12CD34 --from "2026-05-01T00:00:00"
+    Example: credits entries --event-id 7 --occurrence "20260503 0630"
     """
     params = credit_window_params(
         from_local, to_local,
         membername=membername, accountId=account_id, eventId=event_id, entryType=entry_type,
+        occurrenceTimeUtc=(
+            local_iso_to_utc_ms(parse_local_time(occurrence_time_local)) if occurrence_time_local else None
+        ),
         order=order,
     )
     params.update(offset=offset, limit=limit)
@@ -3085,8 +3282,15 @@ def group():
 @click.option("--offset", default=0, help="Pagination offset")
 @click.option("--limit", default=20, help="Pagination limit")
 @pass_context
+@age_help
 def groups_list(ctx: Context, offset: int, limit: int):
     """List all groups.
+
+    {AGE_WINDOW_HELP}
+    A group's reference day is today, so its window moves forward each day.
+    ineligibleMemberCount is how many members of a semi-auto group no longer
+    meet its age band or gender (`group members` says which); nobody is
+    removed automatically.
 
     Example: groups list
     """
@@ -3101,23 +3305,27 @@ def groups_list(ctx: Context, offset: int, limit: int):
 @groups.command("create")
 @click.argument("json_input")
 @pass_context
+@age_help
 def groups_create(ctx: Context, json_input: str):
     """Create a new group from JSON.
 
-    Fields: name (required), description, dobOnOrAfter, dobOnOrBefore, gender,
+    Fields: name (required), description, minAge, maxAge, strictAge, gender,
     semiAuto. Response carries kind = manual | semi_auto | auto:
     no criteria -> manual; criteria + semiAuto=true -> semi_auto; criteria only -> auto.
+    A criterion is gender or an age bound.
 
-    Example: groups create '{"name":"U14 Auto","dobOnOrAfter":"2010-01-01T00:00:00","dobOnOrBefore":"2012-12-31T00:00:00"}'
-    Example: groups create '{"name":"U14 SemiAuto","semiAuto":true,"dobOnOrAfter":"2010-01-01T00:00:00","dobOnOrBefore":"2012-12-31T00:00:00"}'
+    {AGE_BAND_HELP}
+
+    Example: groups create '{"name":"U14 Auto","minAge":12,"maxAge":14}'
+    Example: groups create '{"name":"U14 SemiAuto","semiAuto":true,"minAge":12,"maxAge":{"years":14,"months":6},"strictAge":true}'
     """
     data = parse_json_input(json_input)
     for legacy in ("isAuto", "ageMin", "ageMax", "cutoffDateUtc"):
         if legacy in data:
             raise click.ClickException(
-                f"{legacy!r} is removed; use dobOnOrAfter / dobOnOrBefore / semiAuto (see --help)."
+                f"{legacy!r} is removed; use minAge / maxAge / strictAge / semiAuto (see --help)."
             )
-    data = convert_timestamps(data)
+    data = convert_timestamps(convert_age_band(data))
     response = httpx.post(
         f"{ctx.base_url}/v1/groups",
         json=data,
@@ -3129,8 +3337,19 @@ def groups_create(ctx: Context, json_input: str):
 @group.command("get")
 @click.argument("group_id", type=int)
 @pass_context
+@age_help
 def group_get(ctx: Context, group_id: int):
-    """Get group details with members."""
+    """Get group details with members.
+
+    {AGE_WINDOW_HELP}
+    A group's reference day is today, so its window moves forward each day.
+    Each member row carries eligible: false for a semi-auto member who no
+    longer meets the group's age band or gender, worked out when read; staff,
+    and members of manual and auto groups, are always true.
+    ineligibleMemberCount counts the false ones; nobody is removed
+    automatically. Admins get the notification group.member_ineligible once
+    a day for each member who has newly stopped matching.
+    """
     response = httpx.get(
         f"{ctx.base_url}/v1/groups/by_id/{group_id}",
         headers=ctx.headers,
@@ -3142,6 +3361,7 @@ def group_get(ctx: Context, group_id: int):
 @click.argument("group_id", type=int)
 @click.argument("json_input")
 @pass_context
+@age_help
 def group_update(ctx: Context, group_id: int, json_input: str):
     """Update a group from JSON.
 
@@ -3149,16 +3369,19 @@ def group_update(ctx: Context, group_id: int, json_input: str):
     members (422 MEMBERS_EXIST); manual->semi_auto with ineligible existing members
     is rejected (422 MEMBERS_INELIGIBLE).
 
+    {AGE_BAND_HELP}
+
     Example: group update 1 '{"name": "Advanced"}'
-    Example: group update 1 '{"semiAuto":true,"dobOnOrAfter":"2010-01-01T00:00:00"}'
+    Example: group update 1 '{"semiAuto":true,"minAge":12,"strictAge":true}'
+    Example: group update 1 '{"maxAge":null}'
     """
     data = parse_json_input(json_input)
     for legacy in ("isAuto", "ageMin", "ageMax", "cutoffDateUtc"):
         if legacy in data:
             raise click.ClickException(
-                f"{legacy!r} is removed; use dobOnOrAfter / dobOnOrBefore / semiAuto."
+                f"{legacy!r} is removed; use minAge / maxAge / strictAge / semiAuto (see --help)."
             )
-    data = convert_timestamps(data)
+    data = convert_timestamps(convert_age_band(data))
     response = httpx.patch(
         f"{ctx.base_url}/v1/groups/by_id/{group_id}",
         json=data,
@@ -3181,11 +3404,30 @@ def group_delete(ctx: Context, group_id: int):
 
 @group.command("members")
 @click.argument("group_id", type=int)
+@click.option(
+    "--sort-by", type=click.Choice(["membername", "firstName", "lastName", "nickname"]),
+    help="Sort by this field (default: the server's own order)",
+)
+@click.option("--descending", is_flag=True, default=False, help="Reverse the sort given by --sort-by")
 @pass_context
-def group_members(ctx: Context, group_id: int):
-    """List members of a group."""
+def group_members(ctx: Context, group_id: int, sort_by: str | None, descending: bool):
+    """List members of a group: {membername, firstName, lastName, nickname, eligible}.
+
+    eligible is false for a semi-auto member who no longer meets the group's
+    age band or gender, worked out when read; staff, and members of manual
+    and auto groups, are always true. Nobody is removed automatically.
+
+    Example: group members 1
+    Example: group members 1 --sort-by lastName --descending
+    """
+    params: dict[str, str | bool] = {}
+    if sort_by:
+        params["sortBy"] = sort_by
+    if descending:
+        params["descending"] = True
     response = httpx.get(
         f"{ctx.base_url}/v1/groups/by_id/{group_id}/members",
+        params=params or None,
         headers=ctx.headers,
     )
     print_response(response)
@@ -3601,6 +3843,7 @@ def _owner_base(ctx: "Context", owner_type: str, owner_id: str) -> str:
 @click.option("--tag", required=True, help="Link tag, e.g. hero, gallery, logo")
 @click.option("--metadata", default=None, help="Free-text metadata stored alongside the link")
 @click.option("--preserve-original", is_flag=True, help="Keep the original file as uploaded")
+@click.option("--owner", "owner_username", help=OWNER_OPTION_HELP)
 @pass_context
 def media_attach(
     ctx: Context,
@@ -3610,14 +3853,21 @@ def media_attach(
     tag: str,
     metadata: str | None,
     preserve_original: bool,
+    owner_username: str | None,
 ) -> None:
     """Upload a local file and link it to an owner under TAG.
 
+    --owner names the user the uploaded file belongs to. It is separate from
+    OWNER_TYPE / OWNER_ID, which say what the file is linked to: an admin
+    setting a member's photo names the member in both.
+
     Example: media attach venue 1 ./rink.jpg --tag hero
     Example: media attach event 6034 ./poster.png --tag gallery
+    Example: media attach user alice ./alice.jpg --tag avatar --owner alice
     """
     up = ctx.upload.add_file(
         ctx.base_url, ctx.headers, filepath, preserve_original=preserve_original,
+        form={"ownerUsername": owner_username} if owner_username else None,
     )
     # 202: a video, accepted and queued for conversion; it can be linked at once.
     if up.status_code not in (200, 201, 202):
@@ -3724,15 +3974,21 @@ def media_set_metadata(
 @click.option("--offset", default=0, help="Pagination offset")
 @click.option("--limit", default=100, help="Pagination limit")
 @click.option("--media-type", "media_type", default=None, help="Filter by media type")
+@click.option("--status", "conversion_status", default=None, help="Filter by conversion status, e.g. pending, completed")
 @pass_context
-def media_myfiles(ctx: Context, offset: int, limit: int, media_type: str | None) -> None:
+def media_myfiles(
+    ctx: Context, offset: int, limit: int, media_type: str | None, conversion_status: str | None,
+) -> None:
     """List media you uploaded.
 
     Example: media myfiles
+    Example: media myfiles --media-type video --status pending
     """
     params: dict[str, Any] = {"offset": offset, "limit": limit}
     if media_type:
         params["mediaType"] = media_type
+    if conversion_status:
+        params["conversionStatus"] = conversion_status
     print_response(httpx.get(f"{ctx.base_url}/v1/media/myfiles", params=params, headers=ctx.headers))
 
 
@@ -3794,18 +4050,47 @@ def trash() -> None:
 
 @trash.command("list")
 @click.argument("owner_type", type=click.Choice(sorted(TRASH_PATHS)))
+@click.option("--search", "search_term", help="user only: username, first name, last name, nickname or email contains this text (any case)")
+@click.option("--sort-by", type=USER_SORT_CHOICE, help="user only: sort by this field (default: deletion time)")
+@click.option("--descending", is_flag=True, default=False, help="user only: reverse the sort")
 @click.option("--offset", default=0, help="Pagination offset")
 @click.option("--limit", default=100, help="Pagination limit")
 @pass_context
-def trash_list(ctx: Context, owner_type: str, offset: int, limit: int) -> None:
+def trash_list(
+    ctx: Context,
+    owner_type: str,
+    search_term: str | None,
+    sort_by: str | None,
+    descending: bool,
+    offset: int,
+    limit: int,
+) -> None:
     """List soft-deleted records of one kind.
 
+    The server searches and sorts deleted users only, so --search, --sort-by
+    and --descending are refused for every other kind.
+
     Example: trash list venue
+    Example: trash list user --search ann --sort-by lastName
     """
+    params: dict[str, str | int | bool] = {"offset": offset, "limit": limit}
+    user_only = {"--search": search_term, "--sort-by": sort_by, "--descending": descending}
+    given = [option for option, value in user_only.items() if value]
+    if given and owner_type != "user":
+        raise click.UsageError(
+            f"{', '.join(given)} applies to `trash list user` only; "
+            f"the server does not search or sort deleted {owner_type} records."
+        )
+    if search_term:
+        params["searchTerm"] = search_term
+    if sort_by:
+        params["sortBy"] = sort_by
+    if descending:
+        params["descending"] = True
     coll = TRASH_PATHS[owner_type]
     response = httpx.get(
         f"{ctx.base_url}/v1/{coll}/deleted",
-        params={"offset": offset, "limit": limit},
+        params=params,
         headers=ctx.headers,
     )
     print_response(response)
@@ -3843,19 +4128,25 @@ def upload():
 @uploads.command("list")
 @click.option("--media-type", help="Filter by media type (image, video)")
 @click.option("--status", "conversion_status", help="Filter by conversion status")
+@click.option("--include-deleted", is_flag=True, default=False, help="Also list soft-deleted uploads (deletedAtUtc is set on those)")
 @click.option("--offset", default=0, help="Pagination offset")
 @click.option("--limit", default=20, help="Pagination limit")
 @pass_context
-def uploads_list(ctx: Context, media_type: str | None, conversion_status: str | None, offset: int, limit: int):
+def uploads_list(
+    ctx: Context, media_type: str | None, conversion_status: str | None, include_deleted: bool,
+    offset: int, limit: int,
+):
     """List uploaded media.
 
     Example: uploads list
     Example: uploads list --media-type image
+    Example: uploads list --include-deleted
     """
     response = ctx.upload.list_uploads(
         ctx.base_url, ctx.headers,
         offset=offset, limit=limit,
         media_type=media_type, conversion_status=conversion_status,
+        include_deleted=include_deleted,
     )
     print_response(response)
 
@@ -3871,6 +4162,7 @@ def uploads_list(ctx: Context, media_type: str | None, conversion_status: str | 
 @click.option("--encrypt", is_flag=True, default=False, help="Store the file encrypted at rest")
 @click.option("--start", type=float, help="Video: where the converted clip starts, in seconds")
 @click.option("--duration", type=float, help="Video: how long the converted clip runs, in seconds")
+@click.option("--owner", "owner_username", help=OWNER_OPTION_HELP)
 @pass_context
 def uploads_add_file(
     ctx: Context,
@@ -3880,12 +4172,18 @@ def uploads_add_file(
     encrypt: bool,
     start: float | None,
     duration: float | None,
+    owner_username: str | None,
 ):
     """Upload a media file. Prints the fully-qualified download URL on stdout.
+
+    Without --owner the file belongs to whoever uploads it. A non-admin
+    naming someone else is refused (403 FORBIDDEN); an admin naming a user
+    who does not exist gets 404 USER_NOT_FOUND.
 
     Example: uploads add-file photo.jpg
     Example: uploads add-file video.mp4 --preserve-original --start 5 --duration 30
     Example: uploads add-file id.png --access-role self --access-role admin --encrypt
+    Example: uploads add-file alice.jpg --owner alice --access-role self --access-role admin
     """
     form: dict[str, str] = {}
     if access_roles:
@@ -3896,6 +4194,8 @@ def uploads_add_file(
         form["start"] = str(start)
     if duration is not None:
         form["duration"] = str(duration)
+    if owner_username:
+        form["ownerUsername"] = owner_username
     response = ctx.upload.add_file(
         ctx.base_url, ctx.headers, filepath,
         preserve_original=preserve_original, form=form,
@@ -4066,6 +4366,12 @@ def notifications():
 @pass_context
 def notifications_list(ctx: Context, unread_only: bool, offset: int, limit: int):
     """List my notifications, newest first.
+
+    Each carries a type and its data. Two tell admins, once a day, that a
+    member has newly stopped meeting an age band or gender:
+    enrollment.member_ineligible (data: eventId, eventTitle, membername),
+    for an enrolled member of a programme, and group.member_ineligible
+    (data: groupId, groupName, membername), for a semi-auto group member.
 
     Example: notifications list --unread-only
     """

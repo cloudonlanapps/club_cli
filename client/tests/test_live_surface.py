@@ -212,6 +212,29 @@ def test_restricted_file_needs_the_token_to_download(live: Live, tmp_path: Path)
     live.ok("upload", "download", uuid, anonymous=True)
 
 
+def test_admin_uploads_a_file_that_belongs_to_a_member(live: Live, tmp_path: Path):
+    """--owner (club_server#18): `self` is the member, and so is the right to delete."""
+    member, other = live.active_member(), live.active_member()
+    as_member = {"user": member, "pw": MEMBER_PASSWORD}
+    media_id, uuid = _upload(live, "--owner", member, "--access-role", "self")
+
+    assert live.ok("upload", "get", str(media_id))["uploadedBy"] == member
+    assert media_id in [m["id"] for m in live.ok("media", "myfiles", "--limit", "100", **as_member)["items"]]
+    out = tmp_path / "photo"
+    live.ok("upload", "download", uuid, "-o", str(out), **as_member)
+    assert out.stat().st_size > 0
+    live.refused("upload", "download", uuid, user=other, pw=MEMBER_PASSWORD)
+
+    # Anyone but an admin may name only themselves.
+    res = live.refused("uploads", "add-file", str(PHOTO), "--owner", other, **as_member)
+    assert "FORBIDDEN" in res.output
+    live.ok("uploads", "add-file", str(PHOTO), "--owner", member, **as_member)
+    res = live.refused("uploads", "add-file", str(PHOTO), "--owner", live.unique("nobody"))
+    assert "USER_NOT_FOUND" in res.output
+
+    live.ok("upload", "delete", str(media_id), **as_member)
+
+
 def test_upload_refuses_unknown_roles_and_head_matches_get(live: Live):
     res = live.refused("uploads", "add-file", str(PHOTO), "--access-role", "member")
     assert "Invalid value" in res.output
