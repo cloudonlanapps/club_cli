@@ -276,6 +276,15 @@ def explain_error(data: Any) -> str | None:
     return f"{code}: {hint}"
 
 
+# Shared by the commands that upload a file (club_server#18).
+OWNER_OPTION_HELP = (
+    "Upload on behalf of this user. Admins only; anyone else may name only "
+    "themselves. The file is recorded as theirs: they are who `self` means "
+    "in its access roles, they may change or delete it, and it shows in "
+    "their own file listing."
+)
+
+
 def _echo_media_type(media: dict) -> None:
     """Say what the uploaded file actually is, on stderr (club_server#424).
 
@@ -3710,6 +3719,7 @@ def _owner_base(ctx: "Context", owner_type: str, owner_id: str) -> str:
 @click.option("--tag", required=True, help="Link tag, e.g. hero, gallery, logo")
 @click.option("--metadata", default=None, help="Free-text metadata stored alongside the link")
 @click.option("--preserve-original", is_flag=True, help="Keep the original file as uploaded")
+@click.option("--owner", "owner_username", help=OWNER_OPTION_HELP)
 @pass_context
 def media_attach(
     ctx: Context,
@@ -3719,14 +3729,21 @@ def media_attach(
     tag: str,
     metadata: str | None,
     preserve_original: bool,
+    owner_username: str | None,
 ) -> None:
     """Upload a local file and link it to an owner under TAG.
 
+    --owner names the user the uploaded file belongs to. It is separate from
+    OWNER_TYPE / OWNER_ID, which say what the file is linked to: an admin
+    setting a member's photo names the member in both.
+
     Example: media attach venue 1 ./rink.jpg --tag hero
     Example: media attach event 6034 ./poster.png --tag gallery
+    Example: media attach user alice ./alice.jpg --tag avatar --owner alice
     """
     up = ctx.upload.add_file(
         ctx.base_url, ctx.headers, filepath, preserve_original=preserve_original,
+        form={"ownerUsername": owner_username} if owner_username else None,
     )
     # 202: a video, accepted and queued for conversion; it can be linked at once.
     if up.status_code not in (200, 201, 202):
@@ -3980,6 +3997,7 @@ def uploads_list(ctx: Context, media_type: str | None, conversion_status: str | 
 @click.option("--encrypt", is_flag=True, default=False, help="Store the file encrypted at rest")
 @click.option("--start", type=float, help="Video: where the converted clip starts, in seconds")
 @click.option("--duration", type=float, help="Video: how long the converted clip runs, in seconds")
+@click.option("--owner", "owner_username", help=OWNER_OPTION_HELP)
 @pass_context
 def uploads_add_file(
     ctx: Context,
@@ -3989,12 +4007,18 @@ def uploads_add_file(
     encrypt: bool,
     start: float | None,
     duration: float | None,
+    owner_username: str | None,
 ):
     """Upload a media file. Prints the fully-qualified download URL on stdout.
+
+    Without --owner the file belongs to whoever uploads it. A non-admin
+    naming someone else is refused (403 FORBIDDEN); an admin naming a user
+    who does not exist gets 404 USER_NOT_FOUND.
 
     Example: uploads add-file photo.jpg
     Example: uploads add-file video.mp4 --preserve-original --start 5 --duration 30
     Example: uploads add-file id.png --access-role self --access-role admin --encrypt
+    Example: uploads add-file alice.jpg --owner alice --access-role self --access-role admin
     """
     form: dict[str, str] = {}
     if access_roles:
@@ -4005,6 +4029,8 @@ def uploads_add_file(
         form["start"] = str(start)
     if duration is not None:
         form["duration"] = str(duration)
+    if owner_username:
+        form["ownerUsername"] = owner_username
     response = ctx.upload.add_file(
         ctx.base_url, ctx.headers, filepath,
         preserve_original=preserve_original, form=form,
