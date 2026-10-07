@@ -21,8 +21,6 @@ TIMESTAMP_FIELD_MAP = {
     "startTime": "startTimeUtc",
     "endTime": "endTimeUtc",
     "untilTime": "untilTimeUtc",
-    "dobOnOrAfter": "dobOnOrAfterUtc",
-    "dobOnOrBefore": "dobOnOrBeforeUtc",
     "effectiveTime": "effectiveTimeUtc",
     "expiresAt": "expiresAtUtc",
     "validFrom": "validFromUtc",
@@ -89,6 +87,55 @@ def convert_timestamps(data: dict[str, Any]) -> dict[str, Any]:
             result[api_key] = local_iso_to_utc_ms(value)
         else:
             result[key] = value
+    return result
+
+
+# Eligibility on events and groups is an age band (club_server#16). The two
+# date-of-birth bounds are what the server works out from it, and it refuses
+# them on a write.
+AGE_FIELDS = ("minAge", "maxAge")
+REMOVED_DOB_FIELDS = ("dobOnOrAfter", "dobOnOrBefore", "dobOnOrAfterUtc", "dobOnOrBeforeUtc")
+
+# Shared by the event and group write commands' help.
+AGE_BAND_HELP = """Eligibility by age: minAge and maxAge are each {"years", "months", "days"}
+    (years 0-150, months 0-11, days 0-30; months and days default to 0), or
+    a whole number of years; null clears the bound. strictAge true admits
+    ages exactly minAge to maxAge on the reference day; false (the default)
+    widens each end by a year less a day. minAge above maxAge is refused
+    (422 INVALID_STATE). The date-of-birth window is worked out by the
+    server and cannot be written."""
+
+# Shared by the event and group read commands' help.
+AGE_WINDOW_HELP = """Eligibility: minAge and maxAge ({years, months, days}, or null for no
+    bound) and strictAge are the age band as set. eligibilityReferenceDayUtc
+    is the day ages are counted on, and dobOnOrAfterUtc / dobOnOrBeforeUtc
+    are the dates of birth the band comes to on that day, both inclusive."""
+
+
+def age_help(command):
+    """Fill {AGE_BAND_HELP} / {AGE_WINDOW_HELP} in a command's docstring.
+
+    Goes directly above the `def`, so the text is in place before click reads it.
+    """
+    command.__doc__ = (
+        command.__doc__.replace("{AGE_BAND_HELP}", AGE_BAND_HELP).replace("{AGE_WINDOW_HELP}", AGE_WINDOW_HELP)
+    )
+    return command
+
+
+def convert_age_band(data: dict[str, Any]) -> dict[str, Any]:
+    """Refuse the removed date-of-birth bounds; send a bare number of years as an age."""
+    for field in REMOVED_DOB_FIELDS:
+        if field in data:
+            raise click.ClickException(
+                f"{field!r} is removed: eligibility is an age band. Use minAge / maxAge "
+                "/ strictAge (see --help)."
+            )
+    result = dict(data)
+    for field in AGE_FIELDS:
+        value = result.get(field)
+        if isinstance(value, int) and not isinstance(value, bool):
+            result[field] = {"years": value}
     return result
 
 
@@ -989,20 +1036,25 @@ def user_groups(ctx: Context, username: str):
 @events.command("create")
 @click.argument("json_input")
 @pass_context
+@age_help
 def events_create(ctx: Context, json_input: str):
     """Create a new event from JSON file or inline JSON.
 
     EventCreate now carries: title, description, type, visibility, venueId,
     organizerName, coachNames, startTime, endTime, rrule, untilTime, gender,
-    dobOnOrAfter, dobOnOrBefore, isFeatured, imageUri, galleryUris, sessions.
+    minAge, maxAge, strictAge, isFeatured, imageUri, galleryUris, sessions.
     Legacy auxInfo is no longer supported.
+
+    {AGE_BAND_HELP}
+
+    Example: events create '{"title": "U12 Camp", "type": "camp", "venueId": 1, "startTime": "2026-07-01T06:00:00", "endTime": "2026-07-01T08:00:00", "minAge": 10, "maxAge": {"years": 12, "months": 6}, "strictAge": true}'
     """
     data = parse_json_input(json_input)
     if "auxInfo" in data:
         raise click.ClickException(
-            "auxInfo is removed; move imageUri/isFeatured/galleryUris/sessions/gender/dobOnOrAfter/dobOnOrBefore to top-level event fields."
+            "auxInfo is removed; move imageUri/isFeatured/galleryUris/sessions/gender/minAge/maxAge/strictAge to top-level event fields."
         )
-    data = convert_timestamps(data)
+    data = convert_timestamps(convert_age_band(data))
     response = httpx.post(
         f"{ctx.base_url}/v1/events",
         json=data,
@@ -1019,6 +1071,7 @@ def events_create(ctx: Context, json_input: str):
 @click.option("--offset", default=0, help="Pagination offset")
 @click.option("--limit", default=20, help="Pagination limit")
 @pass_context
+@age_help
 def events_list(
     ctx: Context,
     event_type: str | None,
@@ -1028,7 +1081,12 @@ def events_list(
     offset: int,
     limit: int,
 ):
-    """List events with optional filters."""
+    """List events with optional filters.
+
+    {AGE_WINDOW_HELP}
+    The reference day is the day a camp or one-off starts, and a programme's
+    next occurrence that is not cancelled (today when it has none).
+    """
     params: dict[str, str | int | bool] = {"offset": offset, "limit": limit, "includePast": include_past}
     if event_type:
         params["type"] = event_type
@@ -1092,11 +1150,17 @@ def event_check_user_conflicts(ctx: Context, event_id: int, usernames: tuple[str
 @event.command("get")
 @click.argument("event_id", type=int)
 @pass_context
+@age_help
 def event_get(ctx: Context, event_id: int):
     """Get event details by ID.
 
-    Response now includes gender, dobOnOrAfterUtc, dobOnOrBeforeUtc, isFeatured,
-    imageUri, galleryUris, sessions inline (the aux-info endpoint is gone).
+    Response includes gender, isFeatured, imageUri, galleryUris and sessions
+    inline (the aux-info endpoint is gone).
+
+    {AGE_WINDOW_HELP}
+    The reference day is the day a camp or one-off starts, and a programme's
+    next occurrence that is not cancelled (today when it has none), so a
+    programme's window moves forward.
     """
     response = httpx.get(
         f"{ctx.base_url}/v1/events/by_id/{event_id}",
@@ -1165,6 +1229,7 @@ def patch_event(ctx: Context, event_id: int, suffix: str, data: dict[str, Any]) 
 @click.option("--reset-overrides", is_flag=True, default=False, help="Camp / one-off reschedule: discard per-occurrence overrides that would otherwise block it.")
 @click.option("--version", "version", type=int, help="Event version to send (default: read from the event).")
 @pass_context
+@age_help
 def event_update(
     ctx: Context,
     event_id: int,
@@ -1182,8 +1247,8 @@ def event_update(
 
     \b
     Programme:
-      metadata (title, description, visibility, gender, dobOnOrAfter,
-      dobOnOrBefore, isFeatured, galleryUris, shortDescription, stamp,
+      metadata (title, description, visibility, gender, minAge, maxAge,
+      strictAge, isFeatured, galleryUris, shortDescription, stamp,
       highlights, includes)                → PATCH .../correction
       sessions alone                       → PATCH .../correction, in place,
                                              no cutoff; --schedule-id picks
@@ -1201,7 +1266,11 @@ def event_update(
     When both kinds are present the PATCH goes first and the second call
     follows it. If the second fails, the first has already been applied.
 
+    {AGE_BAND_HELP}
+
     Example: event update 123 '{"title": "New Title"}'
+    Example: event update 123 '{"minAge": 10, "maxAge": {"years": 12, "months": 6}, "strictAge": true}'
+    Example: event update 123 '{"maxAge": null}'
     Example: event update 123 '{"coachNames": ["coach_a"]}' --effective-time-local "2026-06-01T06:00:00"
     Example: event update 123 '{"sessions": [...]}' --schedule-id 4
     Example: event update 123 '{"startTime": "2026-07-01T06:00:00", "endTime": "2026-07-05T08:00:00"}'
@@ -1213,10 +1282,10 @@ def event_update(
     data = parse_json_input(json_input)
     if "auxInfo" in data:
         raise click.ClickException(
-            "auxInfo is removed; move imageUri/isFeatured/galleryUris/sessions/gender/dobOnOrAfter/dobOnOrBefore to top-level event fields."
+            "auxInfo is removed; move imageUri/isFeatured/galleryUris/sessions/gender/minAge/maxAge/strictAge to top-level event fields."
         )
     data.pop("version", None)
-    data = convert_timestamps(data)
+    data = convert_timestamps(convert_age_band(data))
     if not data:
         raise click.ClickException("Nothing to update: the JSON has no event fields.")
 
@@ -1465,10 +1534,11 @@ def event_reinstate(ctx: Context, event_id: int, version: int | None):
 @click.argument("json_input")
 @click.option("--version", "version", type=int, help="Event version to send (default: read from the event).")
 @pass_context
+@age_help
 def event_correct(ctx: Context, event_id: int, json_input: str, version: int | None):
     """Correct what a programme is, across all its occurrences (PATCH .../correction).
 
-    Fields: title, description, visibility, gender, dobOnOrAfter, dobOnOrBefore,
+    Fields: title, description, visibility, gender, minAge, maxAge, strictAge,
     isFeatured, galleryUris, shortDescription, stamp, highlights, includes,
     and sessions with an optional scheduleId: the named schedule's timetable
     (default the latest) is replaced in place, at any time, and must fit that
@@ -1477,7 +1547,10 @@ def event_correct(ctx: Context, event_id: int, json_input: str, version: int | N
     come from `event schedules`.
     Coaching is a timetable change: use `event update ... --effective-time-local`.
 
+    {AGE_BAND_HELP}
+
     Example: event correct 123 '{"title": "Updated Title"}'
+    Example: event correct 123 '{"minAge": 8, "maxAge": null}'
     Example: event correct 123 '{"isFeatured": true, "gender": "female"}' --version 4
     Example: event correct 123 '{"sessions": [...], "scheduleId": 2}'
     """
@@ -1488,7 +1561,7 @@ def event_correct(ctx: Context, event_id: int, json_input: str, version: int | N
             "`event update <id> '{\"coachNames\": [...]}' --effective-time-local ...`."
         )
     data.pop("version", None)
-    data = convert_timestamps(data)
+    data = convert_timestamps(convert_age_band(data))
     data["version"] = resolve_version(ctx, event_id, version)
     print_response(patch_event(ctx, event_id, "/correction", data))
 
@@ -3088,8 +3161,15 @@ def group():
 @click.option("--offset", default=0, help="Pagination offset")
 @click.option("--limit", default=20, help="Pagination limit")
 @pass_context
+@age_help
 def groups_list(ctx: Context, offset: int, limit: int):
     """List all groups.
+
+    {AGE_WINDOW_HELP}
+    A group's reference day is today, so its window moves forward each day.
+    ineligibleMemberCount is how many members of a semi-auto group no longer
+    meet its age band or gender (`group members` says which); nobody is
+    removed automatically.
 
     Example: groups list
     """
@@ -3104,23 +3184,27 @@ def groups_list(ctx: Context, offset: int, limit: int):
 @groups.command("create")
 @click.argument("json_input")
 @pass_context
+@age_help
 def groups_create(ctx: Context, json_input: str):
     """Create a new group from JSON.
 
-    Fields: name (required), description, dobOnOrAfter, dobOnOrBefore, gender,
+    Fields: name (required), description, minAge, maxAge, strictAge, gender,
     semiAuto. Response carries kind = manual | semi_auto | auto:
     no criteria -> manual; criteria + semiAuto=true -> semi_auto; criteria only -> auto.
+    A criterion is gender or an age bound.
 
-    Example: groups create '{"name":"U14 Auto","dobOnOrAfter":"2010-01-01T00:00:00","dobOnOrBefore":"2012-12-31T00:00:00"}'
-    Example: groups create '{"name":"U14 SemiAuto","semiAuto":true,"dobOnOrAfter":"2010-01-01T00:00:00","dobOnOrBefore":"2012-12-31T00:00:00"}'
+    {AGE_BAND_HELP}
+
+    Example: groups create '{"name":"U14 Auto","minAge":12,"maxAge":14}'
+    Example: groups create '{"name":"U14 SemiAuto","semiAuto":true,"minAge":12,"maxAge":{"years":14,"months":6},"strictAge":true}'
     """
     data = parse_json_input(json_input)
     for legacy in ("isAuto", "ageMin", "ageMax", "cutoffDateUtc"):
         if legacy in data:
             raise click.ClickException(
-                f"{legacy!r} is removed; use dobOnOrAfter / dobOnOrBefore / semiAuto (see --help)."
+                f"{legacy!r} is removed; use minAge / maxAge / strictAge / semiAuto (see --help)."
             )
-    data = convert_timestamps(data)
+    data = convert_timestamps(convert_age_band(data))
     response = httpx.post(
         f"{ctx.base_url}/v1/groups",
         json=data,
@@ -3132,8 +3216,19 @@ def groups_create(ctx: Context, json_input: str):
 @group.command("get")
 @click.argument("group_id", type=int)
 @pass_context
+@age_help
 def group_get(ctx: Context, group_id: int):
-    """Get group details with members."""
+    """Get group details with members.
+
+    {AGE_WINDOW_HELP}
+    A group's reference day is today, so its window moves forward each day.
+    Each member row carries eligible: false for a semi-auto member who no
+    longer meets the group's age band or gender, worked out when read; staff,
+    and members of manual and auto groups, are always true.
+    ineligibleMemberCount counts the false ones; nobody is removed
+    automatically. Admins get the notification group.member_ineligible once
+    a day for each member who has newly stopped matching.
+    """
     response = httpx.get(
         f"{ctx.base_url}/v1/groups/by_id/{group_id}",
         headers=ctx.headers,
@@ -3145,6 +3240,7 @@ def group_get(ctx: Context, group_id: int):
 @click.argument("group_id", type=int)
 @click.argument("json_input")
 @pass_context
+@age_help
 def group_update(ctx: Context, group_id: int, json_input: str):
     """Update a group from JSON.
 
@@ -3152,16 +3248,19 @@ def group_update(ctx: Context, group_id: int, json_input: str):
     members (422 MEMBERS_EXIST); manual->semi_auto with ineligible existing members
     is rejected (422 MEMBERS_INELIGIBLE).
 
+    {AGE_BAND_HELP}
+
     Example: group update 1 '{"name": "Advanced"}'
-    Example: group update 1 '{"semiAuto":true,"dobOnOrAfter":"2010-01-01T00:00:00"}'
+    Example: group update 1 '{"semiAuto":true,"minAge":12,"strictAge":true}'
+    Example: group update 1 '{"maxAge":null}'
     """
     data = parse_json_input(json_input)
     for legacy in ("isAuto", "ageMin", "ageMax", "cutoffDateUtc"):
         if legacy in data:
             raise click.ClickException(
-                f"{legacy!r} is removed; use dobOnOrAfter / dobOnOrBefore / semiAuto."
+                f"{legacy!r} is removed; use minAge / maxAge / strictAge / semiAuto (see --help)."
             )
-    data = convert_timestamps(data)
+    data = convert_timestamps(convert_age_band(data))
     response = httpx.patch(
         f"{ctx.base_url}/v1/groups/by_id/{group_id}",
         json=data,
@@ -3186,7 +3285,14 @@ def group_delete(ctx: Context, group_id: int):
 @click.argument("group_id", type=int)
 @pass_context
 def group_members(ctx: Context, group_id: int):
-    """List members of a group."""
+    """List members of a group: {membername, firstName, lastName, nickname, eligible}.
+
+    eligible is false for a semi-auto member who no longer meets the group's
+    age band or gender, worked out when read; staff, and members of manual
+    and auto groups, are always true. Nobody is removed automatically.
+
+    Example: group members 1
+    """
     response = httpx.get(
         f"{ctx.base_url}/v1/groups/by_id/{group_id}/members",
         headers=ctx.headers,
