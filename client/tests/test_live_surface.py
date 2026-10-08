@@ -6,9 +6,13 @@ prove the call sites send what the server accepts, in either module mode.
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 
 import httpx
+from click.testing import CliRunner
+
+from club_client.cli import main
 
 from .live import MEMBER_PASSWORD, Live, days_from_today, slot
 
@@ -286,6 +290,36 @@ def test_issue_15_another_tag_keeps_every_link(live: Live):
 
     linked = live.ok("media", "list", "user", member, "--tag", "gallery")
     assert sorted(row["media"]["uuid"] for row in linked) == sorted([first, second])
+
+
+def _avatar_example() -> list[str]:
+    """The profile photo example of `media attach --help`, as its arguments."""
+    res = CliRunner().invoke(main, ["media", "attach", "--help"])
+    assert res.exit_code == 0, res.output
+    text = " ".join(res.output.split())  # click wraps the help
+    examples = [part.strip() for part in text.split("Options:")[0].split("Example:")[1:]]
+    (example,) = [e for e in examples if "user_avatar" in e]
+    return shlex.split(example)
+
+
+def test_issue_18_the_avatar_example_of_the_help_runs_as_written(live: Live, tmp_path: Path, monkeypatch):
+    """The example is taken from the help, so a change to it changes what runs here."""
+    example = _avatar_example()
+    command, owner_type, username, filepath = example[:2], example[2], example[3], example[4]
+    assert command == ["media", "attach"]
+    assert owner_type == "user"
+    # The user and the file the example names, where it names them.
+    if live.run("user", "get", username).exit_code != 0:
+        live.ok("users", "create", json.dumps(live.member_json(username)))
+    monkeypatch.chdir(tmp_path)
+    Path(filepath).write_bytes(PHOTO.read_bytes())
+
+    out = live.ok(*example)
+
+    uuid = out.split("→")[1].split()[0]  # "Uploaded <name> → <uuid>"
+    linked = live.ok("media", "list", "user", username, "--tag", "user_avatar")
+    assert [row["media"]["uuid"] for row in linked] == [uuid]
+    assert live.ok("upload", "by-uuid", uuid)["uploadedBy"] == username
 
 
 def test_upload_refuses_unknown_roles_and_head_matches_get(live: Live):
