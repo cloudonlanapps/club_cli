@@ -235,6 +235,59 @@ def test_admin_uploads_a_file_that_belongs_to_a_member(live: Live, tmp_path: Pat
     live.ok("upload", "delete", str(media_id), **as_member)
 
 
+def test_issue_14_upload_is_looked_up_by_its_uuid(live: Live):
+    """`upload by-uuid` (club_server#27): the id it prints works where an id is taken."""
+    member = live.active_member()
+    media_id, uuid = _upload(live, "--owner", member, "--access-role", "self")
+
+    found = live.ok("upload", "by-uuid", uuid)
+    assert found["id"] == media_id
+    assert found["uploadedBy"] == member
+    assert live.ok("upload", "by-uuid", uuid, user=member, pw=MEMBER_PASSWORD)["id"] == media_id
+
+    live.ok("upload", "set-access", str(found["id"]), "--role", "public")
+    assert live.ok("upload", "by-uuid", uuid)["accessRoles"] == ["public"]
+
+    other = live.active_member()
+    res = live.refused("upload", "by-uuid", uuid, user=other, pw=MEMBER_PASSWORD)
+    assert "MEDIA_NOT_FOUND" in res.output
+    res = live.refused("upload", "by-uuid", "00000000-0000-4000-8000-000000000000")
+    assert "MEDIA_NOT_FOUND" in res.output
+
+    live.ok("upload", "delete", str(media_id))
+    assert live.ok("upload", "by-uuid", uuid)["deletedAtUtc"] is not None
+
+
+def test_issue_15_a_new_avatar_replaces_the_old_one(live: Live):
+    """A user has one avatar (club_server#28): the second link leaves one, the new one."""
+    member = live.active_member()
+    first_id, first = _upload(live, "--owner", member, "--access-role", "self")
+    _, second = _upload(live, "--owner", member, "--access-role", "self", "--access-role", "admin")
+    as_member = {"user": member, "pw": MEMBER_PASSWORD}
+
+    live.ok("media", "link", "user", member, first, "--tag", "user_avatar", **as_member)
+    linked = live.ok("media", "list", "user", member, "--tag", "user_avatar", **as_member)
+    assert [row["media"]["uuid"] for row in linked] == [first]
+
+    live.ok("media", "link", "user", member, second, "--tag", "user_avatar")
+
+    linked = live.ok("media", "list", "user", member, "--tag", "user_avatar", **as_member)
+    assert [row["media"]["uuid"] for row in linked] == [second]
+    assert live.ok("upload", "get", str(first_id))["deletedAtUtc"] is not None
+
+
+def test_issue_15_another_tag_keeps_every_link(live: Live):
+    member = live.active_member()
+    _, first = _upload(live, "--owner", member, "--access-role", "admin")
+    _, second = _upload(live, "--owner", member, "--access-role", "admin")
+
+    live.ok("media", "link", "user", member, first, "--tag", "gallery")
+    live.ok("media", "link", "user", member, second, "--tag", "gallery")
+
+    linked = live.ok("media", "list", "user", member, "--tag", "gallery")
+    assert sorted(row["media"]["uuid"] for row in linked) == sorted([first, second])
+
+
 def test_upload_refuses_unknown_roles_and_head_matches_get(live: Live):
     res = live.refused("uploads", "add-file", str(PHOTO), "--access-role", "member")
     assert "Invalid value" in res.output
