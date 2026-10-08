@@ -3856,9 +3856,13 @@ def media_attach(
     OWNER_TYPE / OWNER_ID, which say what the file is linked to: an admin
     setting a member's photo names the member in both.
 
+    A user has one profile photo, under the tag user_avatar: a new one
+    replaces the one before it. The server removes the old link and deletes
+    its file unless another link still uses it.
+
     Example: media attach venue 1 ./rink.jpg --tag hero
     Example: media attach event 6034 ./poster.png --tag gallery
-    Example: media attach user alice ./alice.jpg --tag avatar --owner alice
+    Example: media attach user alice ./alice.jpg --tag user_avatar --owner alice
     """
     up = ctx.upload.add_file(
         ctx.base_url, ctx.headers, filepath, preserve_original=preserve_original,
@@ -3891,6 +3895,10 @@ def media_attach(
 @pass_context
 def media_link(ctx: Context, owner_type: str, owner_id: str, media_uuid: str, tag: str) -> None:
     """Link already-uploaded media to an owner, by uuid.
+
+    A user has one profile photo, under the tag user_avatar: linking a new
+    one replaces the one before it. The server removes the old link and
+    deletes its file unless another link still uses it.
 
     Example: media link venue 1 <uuid> --tag hero
     """
@@ -4212,6 +4220,21 @@ def uploads_add_file(
 def upload_get(ctx: Context, upload_id: int):
     """Get upload metadata."""
     response = ctx.upload.get_upload(ctx.base_url, ctx.headers, upload_id)
+    print_response(response)
+
+
+@upload.command("by-uuid")
+@click.argument("uuid")
+@pass_context
+def upload_by_uuid(ctx: Context, uuid: str):
+    """Get upload metadata by its uuid.
+
+    The media link commands show a file's uuid; `upload set-access`,
+    `upload delete` and `upload get` take the numeric id this prints.
+
+    Example: upload by-uuid <uuid>
+    """
+    response = ctx.upload.get_upload_by_uuid(ctx.base_url, ctx.headers, uuid)
     print_response(response)
 
 

@@ -71,6 +71,9 @@ class MediaApi:
     def get_upload(self, base_url, headers, upload_id):
         return httpx.get(f"{base_url}/v1/media/by_id/{upload_id}", headers=headers)
 
+    def get_upload_by_uuid(self, base_url, headers, uuid):
+        return httpx.get(f"{base_url}/v1/media/by_uuid/{uuid}", headers=headers)
+
     def delete_upload(self, base_url, headers, upload_id):
         return httpx.delete(f"{base_url}/v1/media/by_id/{upload_id}", headers=headers)
 
