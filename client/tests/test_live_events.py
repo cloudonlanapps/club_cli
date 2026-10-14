@@ -7,7 +7,15 @@ the server accepts what the CLI sends (cli #33, #26, #25).
 from __future__ import annotations
 
 import json
-from datetime import timedelta
+import shlex
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+import pytest
+from click.testing import CliRunner
+
+import club_client.cli as cli
+from club_client.cli import main
 
 from .live import Live, days_from_today, local, slot
 
@@ -190,3 +198,53 @@ def test_one_off_is_rescheduled_through_event_update(live: Live):
         {"startTime": local(new_start), "endTime": local(new_start + timedelta(hours=1))}))
 
     assert live.ok("occurrences", "get", str(oneoff["id"]), slot(new_start))["status"] == "scheduled"
+
+
+# ── The rule examples of `events create --help` (cli #17) ──────────────
+
+
+def _rule_examples() -> dict[str, dict]:
+    """The `events create` help examples that carry a rule, by event type."""
+    res = CliRunner().invoke(main, ["events", "create", "--help"])
+    assert res.exit_code == 0, res.output
+    text = " ".join(res.output.split())  # click wraps the help
+    examples = [part.strip() for part in text.split("Options:")[0].split("Example:")[1:]]
+    bodies = [json.loads(shlex.split(e)[2]) for e in examples]
+    return {b["type"]: b for b in bodies if "rrule" in b}
+
+
+def _create_as_written(live: Live, body: dict) -> str:
+    """The example as written, at a venue and with an organizer of its own."""
+    body = {**body, "title": live.unique(body["title"]), "venueId": live.venue(), "organizerName": live.coach()}
+    return str(live.ok("events", "create", json.dumps(body))["id"])
+
+
+def _local_starts(live: Live, eid: str, type_: str, days: int) -> list[str]:
+    listed = live.ok(
+        "occurrences", "list", "--event-id", eid, "--type", type_,
+        "--from", "2026-11-02T00:00:00", "--days", str(days),
+    )
+    return sorted(o["occurrenceTimeLocal"] for o in listed)
+
+
+@pytest.fixture
+def ist(monkeypatch):
+    """The examples are written in IST; the CLI reads local times in LOCAL_TZ."""
+    monkeypatch.setattr(cli, "LOCAL_TZ", ZoneInfo("Asia/Kolkata"))
+
+
+def test_issue_17_the_byday_example_of_the_help_runs_on_local_mondays(live: Live, ist):
+    eid = _create_as_written(live, _rule_examples()["programme"])
+
+    starts = _local_starts(live, eid, "programme", 14)
+
+    assert starts == ["20261102 0500", "20261109 0500"]
+    assert {datetime.strptime(s, "%Y%m%d %H%M").strftime("%A") for s in starts} == {"Monday"}
+
+
+def test_issue_17_the_rest_day_example_of_the_help_holds_seven_days_across_ten(live: Live, ist):
+    eid = _create_as_written(live, _rule_examples()["camp"])
+
+    starts = _local_starts(live, eid, "camp", 14)
+
+    assert starts == [f"202611{day:02d} 0900" for day in (2, 4, 6, 8, 9, 10, 11)]

@@ -123,6 +123,25 @@ def age_help(command):
     return command
 
 
+# Shared by the event commands that take a recurrence rule (#17). startTime
+# and endTime are converted to UTC; the rule is sent as written, and the
+# server expands it from the UTC start.
+RRULE_HELP = """rrule is sent as written and read in UTC, from the UTC start, while
+    startTime and endTime are local. BYDAY names UTC weekdays: a session at
+    05:00 IST on a Monday starts on Sunday in UTC, so it is BYDAY=SU. A
+    camp's rest days go on a second line, EXDATE:, each the UTC start of the
+    session it removes (yyyyMMddTHHmmssZ, comma-separated); any other value
+    removes nothing and is not refused. A camp's COUNT is the number of days
+    it is held, rest days not counted: FREQ=DAILY;COUNT=7 with three rest
+    days runs across ten days."""
+
+
+def rrule_help(command):
+    """Fill {RRULE_HELP} in a command's docstring; goes directly above the `def`."""
+    command.__doc__ = command.__doc__.replace("{RRULE_HELP}", RRULE_HELP)
+    return command
+
+
 def convert_age_band(data: dict[str, Any]) -> dict[str, Any]:
     """Refuse the removed date-of-birth bounds; send a bare number of years as an age."""
     for field in REMOVED_DOB_FIELDS:
@@ -1111,6 +1130,7 @@ def user_groups(ctx: Context, username: str):
 @click.argument("json_input")
 @pass_context
 @age_help
+@rrule_help
 def events_create(ctx: Context, json_input: str):
     """Create a new event from JSON file or inline JSON.
 
@@ -1121,7 +1141,20 @@ def events_create(ctx: Context, json_input: str):
 
     {AGE_BAND_HELP}
 
+    {RRULE_HELP}
+
     Example: events create '{"title": "U12 Camp", "type": "camp", "venueId": 1, "startTime": "2026-07-01T06:00:00", "endTime": "2026-07-01T08:00:00", "minAge": 10, "maxAge": {"years": 12, "months": 6}, "strictAge": true}'
+
+    Mondays at 05:00 IST, which are Sundays in UTC:
+
+    \b
+    Example: events create '{"title": "Early Mondays", "type": "programme", "venueId": 1, "startTime": "2026-11-02T05:00:00", "endTime": "2026-11-02T06:00:00", "rrule": "FREQ=WEEKLY;BYDAY=SU"}'
+
+    Seven camp days at 09:00 IST (03:30 UTC) from Monday 2 November, resting
+    on the 3rd, 5th and 7th, so the last is on the 11th:
+
+    \b
+    Example: events create '{"title": "Rest Day Camp", "type": "camp", "venueId": 1, "startTime": "2026-11-02T09:00:00", "endTime": "2026-11-02T11:00:00", "rrule": "FREQ=DAILY;COUNT=7\\nEXDATE:20261103T033000Z,20261105T033000Z,20261107T033000Z"}'
     """
     data = parse_json_input(json_input)
     if "auxInfo" in data:
@@ -1193,11 +1226,14 @@ def events_list(
 @events.command("check-conflict")
 @click.argument("json_input")
 @pass_context
+@rrule_help
 def events_check_conflict(ctx: Context, json_input: str):
     """Report scheduling overlaps for a planned event of any type.
 
     Required: type, venueId, startTime, endTime.
     Optional: rrule, untilTime, organizerName, coachNames, excludeEventId.
+
+    {RRULE_HELP}
 
     Returns {venueConflicts, organizerConflicts, coachConflicts} with
     per-occurrence overlap pairs. Only a programme-against-programme clash
@@ -1318,6 +1354,7 @@ def patch_event(ctx: Context, event_id: int, suffix: str, data: dict[str, Any]) 
 @click.option("--version", "version", type=int, help="Event version to send (default: read from the event).")
 @pass_context
 @age_help
+@rrule_help
 def event_update(
     ctx: Context,
     event_id: int,
@@ -1355,6 +1392,8 @@ def event_update(
     follows it. If the second fails, the first has already been applied.
 
     {AGE_BAND_HELP}
+
+    {RRULE_HELP}
 
     Example: event update 123 '{"title": "New Title"}'
     Example: event update 123 '{"minAge": 10, "maxAge": {"years": 12, "months": 6}, "strictAge": true}'
