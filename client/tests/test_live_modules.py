@@ -159,8 +159,12 @@ def test_event_marketing_follows_the_module(live: Live):
     public_id = live.public_event_id(event["title"])
     block = json.dumps({"fee": 5000, "hasOpenSlots": True})
     if live.caps["eventMarketing"]:
-        live.ok("event", "marketing", "set", str(event["id"]), "--json", block)
+        written = live.ok("event", "marketing", "set", str(event["id"]), "--json", block)
+        assert written["version"] == 2  # an event with no block is at 1 (club_server#13)
         assert live.ok("event", "marketing", "get", str(event["id"]))["fee"] == 5000
+        # Issue 1: a version the block has moved past is refused.
+        res = live.refused("event", "marketing", "set", str(event["id"]), "--json", block, "--version", "1")
+        assert "STALE_VERSION" in res.stdout and "retry with --version 2" in res.stderr
         public = live.ok("public", "event-marketing", public_id, anonymous=True)
         assert public["fee"] == 5000
         live.ok("event", "marketing", "clear", str(event["id"]))

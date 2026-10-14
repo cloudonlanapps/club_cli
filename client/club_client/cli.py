@@ -185,8 +185,9 @@ def explain_stale_version(data: Any) -> str | None:
     """Turn a 409 STALE_VERSION detail into one line an operator can act on.
 
     The detail carries the record's current `version`, `updatedAt` and
-    `updatedBy` — an event's (club_server#292) or an occurrence's
-    (club_server#430); the fix is to reload, or to retry with
+    `updatedBy` — an event's (club_server#292), an occurrence's
+    (club_server#430) or an event's marketing block's (club_server#13);
+    the fix is to reload, or to retry with
     `--version <current>` once the other change has been reviewed.
     """
     detail = data.get("detail") if isinstance(data, dict) else None
@@ -1486,19 +1487,32 @@ def cutoff_ms(value: str) -> int:
     return local_iso_to_utc_ms(parse_local_time(value))
 
 
+# The cutoff verbs carry the event's version, as an edit does (club_server#13).
+EVENT_VERSION_OPTION = click.option(
+    "--version", "version", type=int,
+    help="Event version to send (default: read from the event).",
+)
+
+
 @event.command("cancel")
 @click.argument("event_id", type=int)
 @click.argument("reason")
 @click.option("--effective-time", type=int, help="Cutoff as a UTC ms timestamp")
 @click.option("--effective-time-local", help="Cutoff (local ISO or 'YYYYMMDD HHMM'); occurrences at or after it are cancelled")
+@EVENT_VERSION_OPTION
 @pass_context
-def event_cancel(ctx: Context, event_id: int, reason: str, effective_time: int | None, effective_time_local: str | None):
+def event_cancel(
+    ctx: Context, event_id: int, reason: str, effective_time: int | None, effective_time_local: str | None,
+    version: int | None,
+):
     """Cancel a camp from a cutoff (camp-only).
 
     Occurrences at or after the cutoff are cancelled and their attendance
     refunded; `event undo-cancel` reverses it. A programme answers 400
     INVALID_EVENT_TYPE (use `event terminate`); a one-off answers 422
-    INVALID_STATE (use `event drop`).
+    INVALID_STATE (use `event drop`). Sends the event's version (read from
+    the event unless --version is given); 409 STALE_VERSION means someone
+    changed it first.
 
     Example: event cancel 123 "Rink closed" --effective-time-local "2026-04-01T06:00:00"
     """
@@ -1508,27 +1522,31 @@ def event_cancel(ctx: Context, event_id: int, reason: str, effective_time: int |
         resolved = effective_time
     else:
         raise click.UsageError("A cutoff is required: pass --effective-time-local (or --effective-time).")
-    post_event_verb(ctx, event_id, "cancel", {"reason": reason, "effectiveDateTimeUtc": resolved})
+    post_event_verb(ctx, event_id, "cancel", {
+        "reason": reason, "effectiveDateTimeUtc": resolved, "version": resolve_version(ctx, event_id, version),
+    })
 
 
 @event.command("undo-cancel")
 @click.argument("event_id", type=int)
+@EVENT_VERSION_OPTION
 @pass_context
-def event_undo_cancel(ctx: Context, event_id: int):
-    """Reverse a camp cancellation (camp-only).
+def event_undo_cancel(ctx: Context, event_id: int, version: int | None):
+    """Reverse a camp cancellation (camp-only), at the event's version.
 
     Example: event undo-cancel 123
     """
-    post_event_verb(ctx, event_id, "undo-cancel")
+    post_event_verb(ctx, event_id, "undo-cancel", {"version": resolve_version(ctx, event_id, version)})
 
 
 @event.command("terminate")
 @click.argument("event_id", type=int)
 @click.option("--cutoff-local", required=True, help="Cutoff (local ISO or 'YYYYMMDD HHMM'): an occurrence start at least 30 min ahead")
 @click.option("--reason", required=True, help="Told to the members (event.terminated)")
+@EVENT_VERSION_OPTION
 @pass_context
-def event_terminate(ctx: Context, event_id: int, cutoff_local: str, reason: str):
-    """End a programme at a cutoff (programme-only).
+def event_terminate(ctx: Context, event_id: int, cutoff_local: str, reason: str, version: int | None):
+    """End a programme at a cutoff (programme-only), at the event's version.
 
     Occurrences from the cutoff on are cancelled; members are notified; once
     the cutoff has passed their bound credit is released to a general account.
@@ -1537,35 +1555,43 @@ def event_terminate(ctx: Context, event_id: int, cutoff_local: str, reason: str)
 
     Example: event terminate 123 --cutoff-local "2026-06-01T06:00:00" --reason "Season over"
     """
-    post_event_verb(ctx, event_id, "terminate", {"reason": reason, "cutoffTimeUtc": cutoff_ms(cutoff_local)})
+    post_event_verb(ctx, event_id, "terminate", {
+        "reason": reason, "cutoffTimeUtc": cutoff_ms(cutoff_local),
+        "version": resolve_version(ctx, event_id, version),
+    })
 
 
 @event.command("extend")
 @click.argument("event_id", type=int)
 @click.option("--cutoff-local", required=True, help="New cutoff (local ISO or 'YYYYMMDD HHMM'): an occurrence start at least 30 min ahead")
 @click.option("--reason", help="Told to the members when the cutoff moves earlier (event.extended)")
+@EVENT_VERSION_OPTION
 @pass_context
-def event_extend(ctx: Context, event_id: int, cutoff_local: str, reason: str | None):
-    """Move a terminated programme's cutoff later or earlier (programme-only).
+def event_extend(ctx: Context, event_id: int, cutoff_local: str, reason: str | None, version: int | None):
+    """Move a terminated programme's cutoff later or earlier (programme-only), at the event's version.
 
     Example: event extend 123 --cutoff-local "2026-07-01T06:00:00"
     """
     data: dict[str, Any] = {"cutoffTimeUtc": cutoff_ms(cutoff_local)}
     if reason:
         data["reason"] = reason
+    data["version"] = resolve_version(ctx, event_id, version)
     post_event_verb(ctx, event_id, "extend", data)
 
 
 @event.command("extend-indefinitely")
 @click.argument("event_id", type=int)
 @click.option("--reason", help="Optional note for the audit log")
+@EVENT_VERSION_OPTION
 @pass_context
-def event_extend_indefinitely(ctx: Context, event_id: int, reason: str | None):
-    """Remove a terminated programme's cutoff so it runs open-ended (programme-only).
+def event_extend_indefinitely(ctx: Context, event_id: int, reason: str | None, version: int | None):
+    """Remove a terminated programme's cutoff so it runs open-ended (programme-only), at the event's version.
 
     Example: event extend-indefinitely 123 --reason "Renewed"
     """
-    post_event_verb(ctx, event_id, "extend-indefinitely", {"reason": reason} if reason else {})
+    data: dict[str, Any] = {"reason": reason} if reason else {}
+    data["version"] = resolve_version(ctx, event_id, version)
+    post_event_verb(ctx, event_id, "extend-indefinitely", data)
 
 
 def oneoff_occurrence_version(ctx: Context, event_id: int, version: int | None) -> int:
@@ -1749,9 +1775,42 @@ def print_marketing_response(response: httpx.Response) -> None:
     print_response(response)
 
 
+def marketing_version(ctx: Context, event_id: int, version: int | None) -> int:
+    """The block's version to send: the override, else read from the block.
+
+    The block has a version of its own, apart from the event's, and an event
+    with no block is at version 1 (club_server#13).
+    """
+    if version is not None:
+        return version
+    response = httpx.get(_marketing_url(ctx, event_id), headers=ctx.headers)
+    if response.status_code == 200:
+        return int(response.json()["version"])
+    if response.status_code == 404:
+        try:
+            detail = response.json().get("detail")
+        except json.JSONDecodeError:
+            detail = None
+        if isinstance(detail, dict) and detail.get("code") == "EVENT_MARKETING_NOT_FOUND":
+            return 1
+    print_marketing_response(response)
+    sys.exit(1)
+
+
+MARKETING_VERSION_OPTION = click.option(
+    "--version", "version", type=int,
+    help="Marketing block version to send (default: read from the block; 1 when it has none).",
+)
+
+
 @event.group("marketing")
 def event_marketing():
-    """The event's marketing block: fees, schedule text, offers, facilities."""
+    """The event's marketing block: fees, schedule text, offers, facilities.
+
+    The block has its own version, apart from the event's: set and clear
+    send it (read from the block unless --version is given), and 409
+    STALE_VERSION means someone changed the block first.
+    """
     pass
 
 
@@ -1770,8 +1829,9 @@ def event_marketing_get(ctx: Context, event_id: int):
 @click.argument("event_id", type=int)
 @click.option("--json", "json_value", help="The block as inline JSON")
 @click.option("--file", type=click.Path(exists=True, dir_okay=False), help="The block from a JSON file")
+@MARKETING_VERSION_OPTION
 @pass_context
-def event_marketing_set(ctx: Context, event_id: int, json_value: str | None, file: str | None):
+def event_marketing_set(ctx: Context, event_id: int, json_value: str | None, file: str | None, version: int | None):
     """Replace the whole block (admin or organizer).
 
     Fields: durationText, scheduleText, eligibilityText, eligibilityNote,
@@ -1786,20 +1846,21 @@ def event_marketing_set(ctx: Context, event_id: int, json_value: str | None, fil
     data = _parse_preference_value(json_value, file)
     if not isinstance(data, dict):
         raise click.ClickException("the marketing block must be a JSON object")
-    print_marketing_response(
-        httpx.put(_marketing_url(ctx, event_id), json=marketing_block(data), headers=ctx.headers)
-    )
+    body = {**marketing_block(data), "version": marketing_version(ctx, event_id, version)}
+    print_marketing_response(httpx.put(_marketing_url(ctx, event_id), json=body, headers=ctx.headers))
 
 
 @event_marketing.command("clear")
 @click.argument("event_id", type=int)
+@MARKETING_VERSION_OPTION
 @pass_context
-def event_marketing_clear(ctx: Context, event_id: int):
+def event_marketing_clear(ctx: Context, event_id: int, version: int | None):
     """Delete the block (admin or organizer).
 
     Example: event marketing clear 123
     """
-    print_marketing_response(httpx.delete(_marketing_url(ctx, event_id), headers=ctx.headers))
+    params = {"version": marketing_version(ctx, event_id, version)}
+    print_marketing_response(httpx.delete(_marketing_url(ctx, event_id), params=params, headers=ctx.headers))
 
 
 # ============================================================================

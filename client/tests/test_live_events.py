@@ -50,6 +50,20 @@ def test_stale_occurrence_version_is_refused_and_explained(live: Live):
         assert "retry with --version" in res.stderr
 
 
+def test_issue_1_cutoff_verbs_send_the_events_version_and_a_stale_one_is_refused(live: Live):
+    start = days_from_today(10)
+    camp = live.event("camp", start, rrule="FREQ=DAILY;COUNT=3")
+    eid = str(camp["id"])
+
+    cancelled = live.ok("event", "cancel", eid, "Rink closed", "--effective-time-local", local(start + timedelta(days=1)))
+    assert cancelled["version"] > camp["version"]
+
+    res = live.refused("event", "undo-cancel", eid, "--version", str(camp["version"]))
+    assert "STALE_VERSION" in res.stdout
+    assert f"retry with --version {cancelled['version']}" in res.stderr
+    assert live.ok("event", "undo-cancel", eid)["version"] > cancelled["version"]
+
+
 def test_one_off_drop_and_reinstate_carry_the_occurrence_version(live: Live):
     start = days_from_today(12)
     oneoff = live.event("oneOff", start)
