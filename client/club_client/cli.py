@@ -136,6 +136,28 @@ RRULE_HELP = """rrule is sent as written and read in UTC, from the UTC start, wh
     days runs across ten days."""
 
 
+# Shared by the event and group commands that write eligibility (#13).
+GENDERS_HELP = """Eligibility by gender: genders is a list of male, female, other and
+    prefer_not_to_say, each at most once; a member passes when their gender
+    is listed. An empty list or null clears the criterion. An unknown or
+    repeated value is refused (422). gender, a single value, is the old
+    form, kept by the server for one release: it is stored as a list of one
+    (null clears), and sending it with genders is refused (422)."""
+
+# Shared by the event and group read commands' help.
+GENDERS_READ_HELP = """genders lists the genders admitted, empty for no gender criterion.
+    gender is the old form, kept for one release: the one value when genders
+    holds exactly one, null otherwise."""
+
+
+def genders_help(command):
+    """Fill {GENDERS_HELP} / {GENDERS_READ_HELP} in a command's docstring; goes directly above the `def`."""
+    command.__doc__ = (
+        command.__doc__.replace("{GENDERS_HELP}", GENDERS_HELP).replace("{GENDERS_READ_HELP}", GENDERS_READ_HELP)
+    )
+    return command
+
+
 def rrule_help(command):
     """Fill {RRULE_HELP} in a command's docstring; goes directly above the `def`."""
     command.__doc__ = command.__doc__.replace("{RRULE_HELP}", RRULE_HELP)
@@ -1130,20 +1152,24 @@ def user_groups(ctx: Context, username: str):
 @click.argument("json_input")
 @pass_context
 @age_help
+@genders_help
 @rrule_help
 def events_create(ctx: Context, json_input: str):
     """Create a new event from JSON file or inline JSON.
 
     EventCreate now carries: title, description, type, visibility, venueId,
-    organizerName, coachNames, startTime, endTime, rrule, untilTime, gender,
+    organizerName, coachNames, startTime, endTime, rrule, untilTime, genders,
     minAge, maxAge, strictAge, isFeatured, imageUri, galleryUris, sessions.
     Legacy auxInfo is no longer supported.
 
     {AGE_BAND_HELP}
 
+    {GENDERS_HELP}
+
     {RRULE_HELP}
 
     Example: events create '{"title": "U12 Camp", "type": "camp", "venueId": 1, "startTime": "2026-07-01T06:00:00", "endTime": "2026-07-01T08:00:00", "minAge": 10, "maxAge": {"years": 12, "months": 6}, "strictAge": true}'
+    Example: events create '{"title": "Open Skate", "type": "oneOff", "venueId": 1, "startTime": "2026-07-04T06:00:00", "endTime": "2026-07-04T08:00:00", "genders": ["male", "other", "prefer_not_to_say"]}'
 
     Mondays at 05:00 IST, which are Sundays in UTC:
 
@@ -1159,7 +1185,7 @@ def events_create(ctx: Context, json_input: str):
     data = parse_json_input(json_input)
     if "auxInfo" in data:
         raise click.ClickException(
-            "auxInfo is removed; move imageUri/isFeatured/galleryUris/sessions/gender/minAge/maxAge/strictAge to top-level event fields."
+            "auxInfo is removed; move imageUri/isFeatured/galleryUris/sessions/genders/minAge/maxAge/strictAge to top-level event fields."
         )
     data = convert_timestamps(convert_age_band(data))
     response = httpx.post(
@@ -1180,6 +1206,7 @@ def events_create(ctx: Context, json_input: str):
 @click.option("--limit", default=20, help="Pagination limit")
 @pass_context
 @age_help
+@genders_help
 def events_list(
     ctx: Context,
     event_type: str | None,
@@ -1203,6 +1230,8 @@ def events_list(
     {AGE_WINDOW_HELP}
     The reference day is the day a camp or one-off starts, and a programme's
     next occurrence that is not cancelled (today when it has none).
+
+    {GENDERS_READ_HELP}
     """
     params: dict[str, str | int] = {"offset": offset, "limit": limit}
     if event_type:
@@ -1275,16 +1304,19 @@ def event_check_user_conflicts(ctx: Context, event_id: int, usernames: tuple[str
 @click.argument("event_id", type=int)
 @pass_context
 @age_help
+@genders_help
 def event_get(ctx: Context, event_id: int):
     """Get event details by ID.
 
-    Response includes gender, isFeatured, imageUri, galleryUris and sessions
+    Response includes genders, isFeatured, imageUri, galleryUris and sessions
     inline (the aux-info endpoint is gone).
 
     {AGE_WINDOW_HELP}
     The reference day is the day a camp or one-off starts, and a programme's
     next occurrence that is not cancelled (today when it has none), so a
     programme's window moves forward.
+
+    {GENDERS_READ_HELP}
     """
     response = httpx.get(
         f"{ctx.base_url}/v1/events/by_id/{event_id}",
@@ -1354,6 +1386,7 @@ def patch_event(ctx: Context, event_id: int, suffix: str, data: dict[str, Any]) 
 @click.option("--version", "version", type=int, help="Event version to send (default: read from the event).")
 @pass_context
 @age_help
+@genders_help
 @rrule_help
 def event_update(
     ctx: Context,
@@ -1372,7 +1405,7 @@ def event_update(
 
     \b
     Programme:
-      metadata (title, description, visibility, gender, minAge, maxAge,
+      metadata (title, description, visibility, genders, minAge, maxAge,
       strictAge, isFeatured, galleryUris, shortDescription, stamp,
       highlights, includes)                → PATCH .../correction
       sessions alone                       → PATCH .../correction, in place,
@@ -1393,9 +1426,13 @@ def event_update(
 
     {AGE_BAND_HELP}
 
+    {GENDERS_HELP}
+
     {RRULE_HELP}
 
     Example: event update 123 '{"title": "New Title"}'
+    Example: event update 123 '{"genders": ["female", "other"]}'
+    Example: event update 123 '{"genders": []}'
     Example: event update 123 '{"minAge": 10, "maxAge": {"years": 12, "months": 6}, "strictAge": true}'
     Example: event update 123 '{"maxAge": null}'
     Example: event update 123 '{"coachNames": ["coach_a"]}' --effective-time-local "2026-06-01T06:00:00"
@@ -1409,7 +1446,7 @@ def event_update(
     data = parse_json_input(json_input)
     if "auxInfo" in data:
         raise click.ClickException(
-            "auxInfo is removed; move imageUri/isFeatured/galleryUris/sessions/gender/minAge/maxAge/strictAge to top-level event fields."
+            "auxInfo is removed; move imageUri/isFeatured/galleryUris/sessions/genders/minAge/maxAge/strictAge to top-level event fields."
         )
     data.pop("version", None)
     data = convert_timestamps(convert_age_band(data))
@@ -1687,10 +1724,11 @@ def event_reinstate(ctx: Context, event_id: int, version: int | None):
 @click.option("--version", "version", type=int, help="Event version to send (default: read from the event).")
 @pass_context
 @age_help
+@genders_help
 def event_correct(ctx: Context, event_id: int, json_input: str, version: int | None):
     """Correct what a programme is, across all its occurrences (PATCH .../correction).
 
-    Fields: title, description, visibility, gender, minAge, maxAge, strictAge,
+    Fields: title, description, visibility, genders, minAge, maxAge, strictAge,
     isFeatured, galleryUris, shortDescription, stamp, highlights, includes,
     and sessions with an optional scheduleId: the named schedule's timetable
     (default the latest) is replaced in place, at any time, and must fit that
@@ -1701,9 +1739,11 @@ def event_correct(ctx: Context, event_id: int, json_input: str, version: int | N
 
     {AGE_BAND_HELP}
 
+    {GENDERS_HELP}
+
     Example: event correct 123 '{"title": "Updated Title"}'
     Example: event correct 123 '{"minAge": 8, "maxAge": null}'
-    Example: event correct 123 '{"isFeatured": true, "gender": "female"}' --version 4
+    Example: event correct 123 '{"genders": ["female", "other"]}' --version 4
     Example: event correct 123 '{"sessions": [...], "scheduleId": 2}'
     """
     data = parse_json_input(json_input)
@@ -2289,7 +2329,7 @@ def enrollment_list(ctx: Context, event_id: int, status_filter: str | None):
     enrollments maps each membername to a status; records carries the full
     rows. A row's eligible is false while the member is enrolled (accepted,
     assigned, assignedTrial, withdrawRequested) and no longer meets the
-    event's gender or age window, worked out when read; it is true for
+    event's genders or age window, worked out when read; it is true for
     every other row. Nobody is removed automatically. For a programme with
     a live occurrence, admins get the notification
     enrollment.member_ineligible once a day for each member who has newly
@@ -2750,7 +2790,7 @@ def myevents_enrollment(ctx: Context, event_id: int):
     """Get my enrollment status for an event.
 
     eligible is false while I am enrolled (accepted, assigned,
-    assignedTrial, withdrawRequested) and no longer meets the event's gender
+    assignedTrial, withdrawRequested) and no longer meets the event's genders
     or age window, worked out when read; true otherwise. Nobody is removed
     automatically.
 
@@ -3378,14 +3418,17 @@ def group():
 @click.option("--limit", default=20, help="Pagination limit")
 @pass_context
 @age_help
+@genders_help
 def groups_list(ctx: Context, offset: int, limit: int):
     """List all groups.
 
     {AGE_WINDOW_HELP}
     A group's reference day is today, so its window moves forward each day.
     ineligibleMemberCount is how many members of a semi-auto group no longer
-    meet its age band or gender (`group members` says which); nobody is
+    meet its age band or genders (`group members` says which); nobody is
     removed automatically.
+
+    {GENDERS_READ_HELP}
 
     Example: groups list
     """
@@ -3401,18 +3444,22 @@ def groups_list(ctx: Context, offset: int, limit: int):
 @click.argument("json_input")
 @pass_context
 @age_help
+@genders_help
 def groups_create(ctx: Context, json_input: str):
     """Create a new group from JSON.
 
-    Fields: name (required), description, minAge, maxAge, strictAge, gender,
+    Fields: name (required), description, minAge, maxAge, strictAge, genders,
     semiAuto. Response carries kind = manual | semi_auto | auto:
     no criteria -> manual; criteria + semiAuto=true -> semi_auto; criteria only -> auto.
-    A criterion is gender or an age bound.
+    A criterion is a non-empty genders or an age bound.
 
     {AGE_BAND_HELP}
 
+    {GENDERS_HELP}
+
     Example: groups create '{"name":"U14 Auto","minAge":12,"maxAge":14}'
     Example: groups create '{"name":"U14 SemiAuto","semiAuto":true,"minAge":12,"maxAge":{"years":14,"months":6},"strictAge":true}'
+    Example: groups create '{"name":"Girls U14","minAge":12,"maxAge":14,"genders":["female"]}'
     """
     data = parse_json_input(json_input)
     for legacy in ("isAuto", "ageMin", "ageMax", "cutoffDateUtc"):
@@ -3433,17 +3480,20 @@ def groups_create(ctx: Context, json_input: str):
 @click.argument("group_id", type=int)
 @pass_context
 @age_help
+@genders_help
 def group_get(ctx: Context, group_id: int):
     """Get group details with members.
 
     {AGE_WINDOW_HELP}
     A group's reference day is today, so its window moves forward each day.
     Each member row carries eligible: false for a semi-auto member who no
-    longer meets the group's age band or gender, worked out when read; staff,
+    longer meets the group's age band or genders, worked out when read; staff,
     and members of manual and auto groups, are always true.
     ineligibleMemberCount counts the false ones; nobody is removed
     automatically. Admins get the notification group.member_ineligible once
     a day for each member who has newly stopped matching.
+
+    {GENDERS_READ_HELP}
     """
     response = httpx.get(
         f"{ctx.base_url}/v1/groups/by_id/{group_id}",
@@ -3457,6 +3507,7 @@ def group_get(ctx: Context, group_id: int):
 @click.argument("json_input")
 @pass_context
 @age_help
+@genders_help
 def group_update(ctx: Context, group_id: int, json_input: str):
     """Update a group from JSON.
 
@@ -3466,7 +3517,11 @@ def group_update(ctx: Context, group_id: int, json_input: str):
 
     {AGE_BAND_HELP}
 
+    {GENDERS_HELP}
+
     Example: group update 1 '{"name": "Advanced"}'
+    Example: group update 1 '{"genders":["female","other"]}'
+    Example: group update 1 '{"genders":[]}'
     Example: group update 1 '{"semiAuto":true,"minAge":12,"strictAge":true}'
     Example: group update 1 '{"maxAge":null}'
     """
@@ -3509,7 +3564,7 @@ def group_members(ctx: Context, group_id: int, sort_by: str | None, descending: 
     """List members of a group: {membername, firstName, lastName, nickname, eligible}.
 
     eligible is false for a semi-auto member who no longer meets the group's
-    age band or gender, worked out when read; staff, and members of manual
+    age band or genders, worked out when read; staff, and members of manual
     and auto groups, are always true. Nobody is removed automatically.
 
     Example: group members 1
@@ -4429,7 +4484,7 @@ def user_transfer_superadmin(ctx: Context, username: str, yes: bool):
 @click.argument("event_id", type=int)
 @pass_context
 def event_eligible(ctx: Context, event_id: int):
-    """Members eligible to enrol in an event (its gender and date-of-birth rules).
+    """Members eligible to enrol in an event (its genders and date-of-birth rules).
 
     Example: event eligible 123
     """
@@ -4486,7 +4541,7 @@ def notifications_list(ctx: Context, unread_only: bool, offset: int, limit: int)
     """List my notifications, newest first.
 
     Each carries a type and its data. Two tell admins, once a day, that a
-    member has newly stopped meeting an age band or gender:
+    member has newly stopped meeting an age band or genders:
     enrollment.member_ineligible (data: eventId, eventTitle, membername),
     for an enrolled member of a programme, and group.member_ineligible
     (data: groupId, groupName, membername), for a semi-auto group member.
