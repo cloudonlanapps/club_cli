@@ -136,18 +136,15 @@ RRULE_HELP = """rrule is sent as written and read in UTC, from the UTC start, wh
     days runs across ten days."""
 
 
-# Shared by the event and group commands that write eligibility (#13).
+# Shared by the event and group commands that write eligibility (#13, #25).
 GENDERS_HELP = """Eligibility by gender: genders is a list of male, female, other and
     prefer_not_to_say, each at most once; a member passes when their gender
     is listed. An empty list or null clears the criterion. An unknown or
-    repeated value is refused (422). gender, a single value, is the old
-    form, kept by the server for one release: it is stored as a list of one
-    (null clears), and sending it with genders is refused (422)."""
+    repeated value is refused (422). Sending gender, a single value, is
+    refused (422): the server takes genders only."""
 
 # Shared by the event and group read commands' help.
-GENDERS_READ_HELP = """genders lists the genders admitted, empty for no gender criterion.
-    gender is the old form, kept for one release: the one value when genders
-    holds exactly one, null otherwise."""
+GENDERS_READ_HELP = """genders lists the genders admitted, empty for no gender criterion."""
 
 
 def genders_help(command):
