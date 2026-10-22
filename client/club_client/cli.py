@@ -1308,6 +1308,11 @@ def event_get(ctx: Context, event_id: int):
     Response includes genders, isFeatured, imageUri, galleryUris and sessions
     inline (the aux-info endpoint is gone).
 
+    It also carries isPast and hasEnded, worked out as of the response.
+    isPast: every occurrence has finished, cancelled or not. hasEnded: no
+    live occurrence remains ahead. A programme past its cutoff, or a camp
+    whose remaining days are all cancelled, has ended but is not past.
+
     {AGE_WINDOW_HELP}
     The reference day is the day a camp or one-off starts, and a programme's
     next occurrence that is not cancelled (today when it has none), so a
@@ -2061,7 +2066,9 @@ def occurrences_get(ctx: Context, event_id: int, occurrence_time_local: str):
 @OCCURRENCE_VERSION_OPTION
 @pass_context
 def occurrences_cancel(ctx: Context, event_id: int, occurrence_time_local: str, reason: str, version: int | None):
-    """Cancel a specific occurrence.
+    """Cancel a specific occurrence of a camp or programme.
+
+    A one-off is refused (422 INVALID_STATE): call it off with `event drop`.
 
     Carries the occurrence's version (read unless --version is given);
     409 STALE_VERSION means someone changed the occurrence first.
@@ -2087,7 +2094,10 @@ def occurrences_cancel(ctx: Context, event_id: int, occurrence_time_local: str, 
 @OCCURRENCE_VERSION_OPTION
 @pass_context
 def occurrences_undo_cancel(ctx: Context, event_id: int, occurrence_time_local: str, version: int | None):
-    """Restore a cancelled occurrence.
+    """Restore a cancelled occurrence of a camp or programme.
+
+    A one-off is refused (422 INVALID_STATE): bring it back with
+    `event reinstate`.
 
     Carries the occurrence's version (read unless --version is given).
 

@@ -209,3 +209,35 @@ def test_issue_17_server_refusal_exits_nonzero(monkeypatch):
 
     assert res.exit_code != 0
     assert "PAST_OCCURRENCE" in res.output
+
+
+# ---------------------------------------------------------------- help (#26)
+
+
+def _help(*command: str) -> str:
+    res = run(*command, "--help")
+    assert res.exit_code == 0, res.output
+    return " ".join(res.output.split())  # click wraps the help
+
+
+def test_issue_26_occurrence_cancel_help_says_a_one_off_is_dropped():
+    text = _help("occurrences", "cancel")
+
+    assert "camp or programme" in text
+    assert "A one-off is refused (422 INVALID_STATE)" in text
+    assert "event drop" in text
+
+
+def test_issue_26_occurrence_undo_cancel_help_says_a_one_off_is_reinstated():
+    text = _help("occurrences", "undo-cancel")
+
+    assert "camp or programme" in text
+    assert "A one-off is refused (422 INVALID_STATE)" in text
+    assert "event reinstate" in text
+
+
+def test_issue_26_event_get_help_names_is_past_and_has_ended():
+    text = _help("event", "get")
+
+    assert "isPast" in text and "hasEnded" in text
+    assert "has ended but is not past" in text
