@@ -29,6 +29,18 @@ def test_user_private_record_for_self_and_admin(live: Live):
     assert live.ok("user", "private", member, user=member, pw=MEMBER_PASSWORD)["username"] == member
 
 
+def test_issue_27_an_admin_cannot_block_mark_left_or_delete_themselves(live: Live):
+    # A plain admin: the suite signs in as the super admin, a target the server
+    # guards separately (403 SUPER_ADMIN_PROTECTION).
+    admin = live.active_member()
+    live.ok("user", "add-role", admin, "admin")
+
+    for verb in ("block", "mark-left", "delete"):
+        res = live.refused("user", verb, admin, user=admin, pw=MEMBER_PASSWORD)
+        assert "CANNOT_ACT_ON_SELF" in res.output, (verb, res.output)
+    assert live.ok("user", "get", admin)["status"] == "active", "each refusal leaves the account unchanged"
+
+
 def test_superadmin_transfer_needs_yes_and_can_be_handed_back(live: Live):
     heir = live.active_member()
 

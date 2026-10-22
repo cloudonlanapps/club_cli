@@ -987,6 +987,18 @@ RESOLUTION_REASON_HELP = (
 )
 
 
+# Shared by user block, mark-left and delete (club_server#62, cli #27).
+SELF_REFUSAL_HELP = """You cannot target your own account: the server refuses with 422
+    CANNOT_ACT_ON_SELF and leaves it unchanged. The super admin cannot be
+    targeted either (403 SUPER_ADMIN_PROTECTION)."""
+
+
+def self_refusal_help(command):
+    """Fill {SELF_REFUSAL_HELP} in a command's docstring; goes directly above the `def`."""
+    command.__doc__ = command.__doc__.replace("{SELF_REFUSAL_HELP}", SELF_REFUSAL_HELP)
+    return command
+
+
 def resolution_body(reason: str | None) -> dict[str, str] | None:
     """The body `approve` and `block` take, or none when no reason is given."""
     return {"resolutionReason": reason} if reason else None
@@ -996,8 +1008,11 @@ def resolution_body(reason: str | None) -> dict[str, str] | None:
 @click.argument("username")
 @click.option("--reason", help=RESOLUTION_REASON_HELP)
 @pass_context
+@self_refusal_help
 def user_block(ctx: Context, username: str, reason: str | None):
     """Block a user.
+
+    {SELF_REFUSAL_HELP}
 
     Example: user block alice
     Example: user block alice --reason "Duplicate of alice2"
@@ -1013,8 +1028,12 @@ def user_block(ctx: Context, username: str, reason: str | None):
 @user.command("delete")
 @click.argument("username")
 @pass_context
+@self_refusal_help
 def user_delete(ctx: Context, username: str):
-    """Soft delete a user."""
+    """Soft delete a user.
+
+    {SELF_REFUSAL_HELP}
+    """
     response = httpx.delete(
         f"{ctx.base_url}/v1/users/by_id/{username}",
         headers=ctx.headers,
@@ -1072,8 +1091,12 @@ def user_unblock(ctx: Context, username: str):
 @user.command("mark-left")
 @click.argument("username")
 @pass_context
+@self_refusal_help
 def user_mark_left(ctx: Context, username: str):
-    """Mark a user as left."""
+    """Mark a user as left.
+
+    {SELF_REFUSAL_HELP}
+    """
     response = httpx.post(
         f"{ctx.base_url}/v1/users/by_id/{username}/mark-left",
         headers=ctx.headers,
