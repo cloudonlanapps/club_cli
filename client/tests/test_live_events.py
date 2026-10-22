@@ -248,3 +248,31 @@ def test_issue_17_the_rest_day_example_of_the_help_holds_seven_days_across_ten(l
     starts = _local_starts(live, eid, "camp", 14)
 
     assert starts == [f"202611{day:02d} 0900" for day in (2, 4, 6, 8, 9, 10, 11)]
+
+
+# ── One-offs and the lifecycle answers (club_server#48, #53, cli #26) ───
+
+
+def test_issue_26_a_one_off_is_not_cancelled_per_occurrence(live: Live):
+    start = days_from_today(13)
+    eid = str(live.event("oneOff", start)["id"])
+
+    res = live.refused("occurrences", "cancel", eid, slot(start), "--reason", "r")
+    assert "INVALID_STATE" in res.output and "/drop" in res.output, res.output
+    res = live.refused("occurrences", "undo-cancel", eid, slot(start))
+    assert "INVALID_STATE" in res.output and "/reinstate" in res.output, res.output
+    assert live.ok("occurrences", "get", eid, slot(start))["status"] == "scheduled"
+
+
+def test_issue_26_event_get_carries_is_past_and_has_ended(live: Live):
+    start = days_from_today(14)
+    camp = live.event("camp", start, rrule="FREQ=DAILY;COUNT=2")
+    eid = str(camp["id"])
+    got = live.ok("event", "get", eid)
+    assert (got["isPast"], got["hasEnded"]) == (False, False)
+
+    for day in (0, 1):
+        live.ok("occurrences", "cancel", eid, slot(start + timedelta(days=day)), "--reason", "r")
+
+    got = live.ok("event", "get", eid)
+    assert (got["isPast"], got["hasEnded"]) == (False, True), "every day cancelled: ended, not past"
