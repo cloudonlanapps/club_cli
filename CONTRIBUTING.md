@@ -24,8 +24,6 @@ This applies to bugs, features, refactors, docs, dependency bumps, test tooling 
 5. Open PR linked to the issue ("Fixes #N")
    ↓
 6. Review → merge to main
-   ↓
-7. Tag the release on main (RELEASE_VERSION_<major>_<minor>_<patch>)
 ```
 
 ## Conventions
@@ -73,8 +71,8 @@ It moves with club_server's:
 | a release | **major** |
 | a quick fix after a release | **patch** |
 
-A release is tagged `RELEASE_VERSION_<major>_<minor>_<patch>` in club_server,
-club_client, club_sdk and club_cli, which take the same major at each release.
+The CLI is not tagged. Release tags are cut in club_server and club_client
+only.
 
 ## 2. Triage
 
@@ -175,4 +173,3 @@ Conventions Claude must follow on this repo:
 2. **Always branch from `main`.**
 3. **Never push, open PRs, or merge without explicit user confirmation.**
 4. **Always link PRs to their issue** with `Fixes #N` in the PR body.
-5. **Never tag a release.** That's a human-only operation.
