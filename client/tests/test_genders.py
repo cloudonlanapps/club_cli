@@ -1,8 +1,9 @@
 """Eligibility by gender on events and groups is a list (club_server#25, #26).
 
 `genders` lists the genders admitted; an empty list or null clears the
-criterion. The CLI sends it as written. The single `gender` is the server's
-old form, kept for one release, and the help says so.
+criterion. The CLI sends it as written. The server no longer takes the
+single `gender` on events and groups (club_server#54): sending it is refused,
+and the help says so.
 """
 from __future__ import annotations
 
@@ -120,24 +121,25 @@ def _help(*command: str) -> str:
 @pytest.mark.parametrize("command", [
     ("events", "create"), ("event", "update"), ("event", "correct"), ("groups", "create"), ("group", "update"),
 ])
-def test_issue_13_write_help_names_genders_and_marks_gender_as_the_old_form(command):
+def test_issue_25_write_help_names_genders_and_says_gender_is_refused(command):
     text = _help(*command)
 
     assert "genders" in text
     for value in ("male", "female", "other", "prefer_not_to_say"):
         assert value in text, value
     assert "An empty list or null clears the criterion" in text
-    assert "gender, a single value, is the old form" in text
-    assert '"gender":' not in text, "no example sets the old single gender"
+    assert "Sending gender, a single value, is refused (422)" in text
+    assert "old form" not in text and "one release" not in text
+    assert '"gender":' not in text, "no example sets the single gender"
     assert "{GENDERS" not in text
 
 
 @pytest.mark.parametrize("command", [("events", "list"), ("event", "get"), ("groups", "list"), ("group", "get")])
-def test_issue_13_read_help_describes_genders_and_the_old_gender(command):
+def test_issue_25_read_help_describes_genders_only(command):
     text = _help(*command)
 
     assert "genders lists the genders admitted" in text
-    assert "gender is the old form" in text
+    assert "old form" not in text and "one release" not in text
     assert "{GENDERS" not in text
 
 
@@ -149,6 +151,6 @@ def test_issue_13_eligibility_notes_say_genders(command):
     text = _help(*command)
 
     assert "genders" in text
-    # Only the reading note's two phrases may name the single gender.
-    rest = text.replace("gender is the old form", "").replace("no gender criterion", "")
+    # Only the reading note's "no gender criterion" may name the single gender.
+    rest = text.replace("no gender criterion", "")
     assert re.search(r"\bgender\b", rest) is None

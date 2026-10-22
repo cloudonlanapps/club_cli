@@ -319,11 +319,11 @@ def test_issue_16_update_version_override_skips_nothing_but_wins(monkeypatch):
 def test_issue_16_correct_sends_version_from_get(monkeypatch):
     fake = _fake(monkeypatch, PROGRAMME)
 
-    res = run("event", "correct", "7", '{"isFeatured": true, "gender": "female"}')
+    res = run("event", "correct", "7", '{"isFeatured": true, "genders": ["female"]}')
 
     assert res.exit_code == 0, res.output
     (call,) = fake.calls_to("PATCH", f"{EVENT}/correction")
-    assert call.json == {"isFeatured": True, "gender": "female", "version": 3}
+    assert call.json == {"isFeatured": True, "genders": ["female"], "version": 3}
 
 
 def test_issue_16_correct_version_override(monkeypatch):
