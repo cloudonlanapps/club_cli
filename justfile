@@ -190,6 +190,31 @@ guest JSON:
 
 # ── Resource creates (admin) ────────────────────────────────────────────
 
+# JSON: {"positions": [{"value", "label": {lang: text}}], "languages": [...]}.
+# Replace the club's profile options (positions and languages) from a file.
+profile_options JSON:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    PW=$(just _admin_pw)
+    uv run --project client club_client --base-url {{URL}} -u {{USER}} --pw "$PW" \
+      profile-options set --file {{JSON}}
+
+# JSON: a template, the body `applications create` takes. Skips one whose
+# English title a live template already has; the new one stays a draft.
+# Create an application template from a file.
+application JSON:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    TITLE=$(python3 -c "import json,sys;print((json.load(open(sys.argv[1])).get('title') or {}).get('en',''))" {{JSON}})
+    PW=$(just _admin_pw)
+    if [[ -n "$TITLE" ]] && uv run --project client club_client --base-url {{URL}} -u {{USER}} --pw "$PW" \
+         applications list --limit 100 \
+       | python3 -c "import json,sys; sys.exit(0 if any((a.get('title') or {}).get('en')==sys.argv[1] for a in json.load(sys.stdin).get('items',[])) else 1)" "$TITLE"; then
+      echo "application exists, skipping: $TITLE"; exit 0
+    fi
+    uv run --project client club_client --base-url {{URL}} -u {{USER}} --pw "$PW" \
+      applications create --file {{JSON}}
+
 venue JSON:
     #!/usr/bin/env bash
     set -euo pipefail

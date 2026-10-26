@@ -1,0 +1,125 @@
+"""The extended profile and profile options against a live server (club_server#92, cli #38).
+
+cli_test.conf turns the extended profile on and cli_test_modules_off.conf
+turns it off. The fields are stored either way; only `profile-options set`
+answers 503 while it is off.
+"""
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from .conftest import EXPECT_MODULES
+from .live import MEMBER_PASSWORD, Live
+
+APRIL_1_2026_UTC_MS = 1775001600000
+OPTIONS = {
+    "positions": [
+        {"value": "Forward", "label": {"en": "Forward", "mr": "फॉरवर्ड"}},
+        {"value": "Goalie", "label": {"en": "Goalie"}},
+    ],
+    "languages": ["English", "Marathi"],
+}
+
+
+def _private(live: Live, username: str) -> dict:
+    return live.ok("user", "private", username)
+
+
+def test_issue_38_capabilities_report_extended_profile(live: Live):
+    assert "extendedProfile" in live.caps, live.caps
+    if EXPECT_MODULES is None:
+        pytest.skip("CLUB_EXPECT_MODULES not set; nothing to compare against")
+    assert live.caps["extendedProfile"] is (EXPECT_MODULES == "on")
+
+
+@pytest.mark.modules_on
+def test_issue_38_member_sets_and_clears_every_own_extended_field(live: Live, tmp_path):
+    path = tmp_path / "profile_options.json"
+    path.write_text(json.dumps(OPTIONS, ensure_ascii=False), encoding="utf-8")
+    assert live.ok("profile-options", "set", "--file", str(path)) == OPTIONS
+    member = live.active_member()
+    assert live.ok("profile-options", "get", user=member, pw=MEMBER_PASSWORD) == OPTIONS
+
+    live.ok(
+        "me", "update",
+        "--club-district", "Pune District", "--preferred-position", "Forward",
+        "--past-experience", "Two seasons\nat the rink", "--nationality", "Indian",
+        "--preferred-language", "Marathi",
+        "--guardian-name", "Ravi", "--guardian-relation", "Father", "--guardian-phone", "9000000001",
+        user=member, pw=MEMBER_PASSWORD,
+    )
+    stored = _private(live, member)
+    assert {k: stored[k] for k in (
+        "clubDistrict", "preferredPosition", "pastExperience", "nationality", "preferredLanguage", "guardian",
+    )} == {
+        "clubDistrict": "Pune District", "preferredPosition": "Forward",
+        "pastExperience": "Two seasons\nat the rink", "nationality": "Indian",
+        "preferredLanguage": "Marathi",
+        "guardian": {"name": "Ravi", "relation": "Father", "phone": "9000000001"},
+    }
+
+    # One guardian part changes; the others are kept.
+    live.ok("me", "update", "--guardian-phone", "9000000002", user=member, pw=MEMBER_PASSWORD)
+    assert _private(live, member)["guardian"] == {"name": "Ravi", "relation": "Father", "phone": "9000000002"}
+
+    live.ok("me", "update", "--clear", "past-experience", "--clear", "guardian", user=member, pw=MEMBER_PASSWORD)
+    cleared = _private(live, member)
+    assert cleared["pastExperience"] is None and cleared["guardian"] is None
+    assert cleared["nationality"] == "Indian"
+
+
+@pytest.mark.modules_off
+def test_issue_38_extended_fields_are_stored_while_the_module_is_off(live: Live):
+    res = live.refused("profile-options", "set", "--json", json.dumps(OPTIONS))
+    assert "EXTENDED_PROFILE_DISABLED" in res.output
+    member = live.active_member()
+
+    live.ok("me", "update", "--nationality", "Indian", "--guardian-name", "Ravi", user=member, pw=MEMBER_PASSWORD)
+
+    stored = _private(live, member)
+    assert stored["nationality"] == "Indian"
+    assert stored["guardian"]["name"] == "Ravi"
+
+
+def test_issue_38_a_choice_outside_the_club_options_is_refused(live: Live):
+    member = live.active_member()
+
+    res = live.refused("me", "update", "--preferred-position", live.unique("Nowhere"), user=member, pw=MEMBER_PASSWORD)
+
+    assert "INVALID_PROFILE_OPTION" in res.output
+    assert _private(live, member)["preferredPosition"] is None
+
+
+def test_issue_38_admin_sets_and_clears_the_membership_date(live: Live):
+    member = live.active_member()
+
+    live.ok("user", "update", member, "--membership-date", "2026-04-01")
+    assert _private(live, member)["membershipDateUtc"] == APRIL_1_2026_UTC_MS
+
+    live.ok("user", "update", member, "--clear", "membership-date")
+    assert _private(live, member)["membershipDateUtc"] is None
+
+
+def test_issue_38_a_member_cannot_set_their_own_membership_date(live: Live):
+    member = live.active_member()
+
+    res = live.refused("me", "update", "--membership-date", "2026-04-01", user=member, pw=MEMBER_PASSWORD)
+
+    assert "PROTECTED_FIELDS" in res.output
+
+
+def test_issue_38_an_unapproved_user_sets_their_own_extended_fields(live: Live):
+    username = live.unique("reg")
+    live.ok("users", "register", json.dumps(live.member_json(username)), anonymous=True)
+    assert live.ok("user", "get", username)["status"] in ("registered", "pending")
+
+    live.ok(
+        "me", "update", "--nationality", "Indian", "--guardian-relation", "Mother",
+        user=username, pw=MEMBER_PASSWORD,
+    )
+
+    stored = _private(live, username)
+    assert stored["nationality"] == "Indian"
+    assert stored["guardian"] == {"name": None, "relation": "Mother", "phone": None}

@@ -264,6 +264,14 @@ ERROR_HINTS = {
     "CREDIT_SYSTEM_DISABLED": "this deployment does not run the credit system (see `capabilities`).",
     "EVALUATIONS_DISABLED": "this deployment does not ship evaluations (see `capabilities`).",
     "EVENT_MARKETING_DISABLED": "this deployment does not ship event marketing (see `capabilities`).",
+    "EXTENDED_PROFILE_DISABLED": (
+        "this deployment does not offer the extended profile (see `capabilities`); "
+        "its fields can still be set with `user update`."
+    ),
+    "INVALID_PROFILE_OPTION": (
+        "a preferred position or language must be one of the club's options; "
+        "list them with `profile-options get`."
+    ),
     "INVALID_ANSWER": (
         "the answer does not fit its question; `evaluations templates get <template>` "
         "shows each item's type, scale and choices."
@@ -296,6 +304,34 @@ ERROR_HINTS = {
         "period (or with no period); change the period, or use the existing one."
     ),
     "PERIOD_IN_FUTURE": "a review period looks back: end it no later than now.",
+    "APPLICATIONS_DISABLED": (
+        "this deployment does not offer applications (see `capabilities`): they need "
+        "APPLICATIONS_ENABLED and IDENTITY_VERIFICATION_REQUIRED both on."
+    ),
+    "APPLICATION_NOT_FOUND": (
+        "no such application, or not one you may see (a member sees the published ones only); "
+        "`applications list` shows them."
+    ),
+    "APPLICATION_NOT_PUBLISHED": (
+        "a member's form is drawn only from a published application: `applications save <id>` "
+        "then `applications publish <id>`, or draw `applications preview <id>`."
+    ),
+    "APPLICATION_NOT_ELIGIBLE": (
+        "none of the application's age categories matches the member's date of birth and gender "
+        "(`applications show <id>` lists them)."
+    ),
+    "APPLICATION_INVALID_REFERENCE": (
+        "a text names a clause the library lacks, a fact the template lacks, or a fact of the "
+        "wrong type for its gap; `applications clauses` lists each clause's gaps and their types."
+    ),
+    "APPLICATION_INCOMPLETE": (
+        "save needs the title, declaration and footer line, and every printed text in each print "
+        "language; add them with `applications update <id>`."
+    ),
+    "APPLICATION_DOES_NOT_FIT": (
+        "the details alone do not fit page 1; shorten what page 1 prints (header, selections, "
+        "declaration) with `applications update <id>`."
+    ),
 }
 
 
@@ -312,6 +348,11 @@ def explain_error(data: Any) -> str | None:
     item_ids = (detail.get("details") or {}).get("itemIds") if code == "INCOMPLETE" else None
     if item_ids:
         hint += f" Items: {', '.join(str(i) for i in item_ids)}."
+    details = detail.get("details") if isinstance(detail.get("details"), dict) else {}
+    if code == "APPLICATION_INCOMPLETE" and details.get("missing"):
+        hint += f" Missing in {details.get('language')!r}: {', '.join(str(m) for m in details['missing'])}."
+    if code == "APPLICATION_DOES_NOT_FIT" and details.get("overflowPt") is not None:
+        hint += f" Over by {details['overflowPt']} pt."
     return f"{code}: {hint}"
 
 
@@ -434,12 +475,18 @@ def main(
 @main.command("capabilities")
 @pass_context
 def capabilities(ctx: Context):
-    """What this deployment can do: {creditSystem, evaluations, eventMarketing, identityVerification, defaultCountryCode}.
+    """What this deployment can do: {creditSystem, evaluations, eventMarketing, identityVerification, extendedProfile, applications, defaultCountryCode}.
 
     Anyone may ask, before login too. The optional modules' routes exist on
     every deployment and answer 503 while off, so this is the way to find out.
     identityVerification false means registration lands in pending, with no
     identity document to upload before review.
+    extendedProfile says whether the apps offer the extended profile
+    (club_server#92); its fields are stored either way, and only
+    `profile-options set` answers 503 while it is off.
+    applications (club_server#93) is true only where the deployment turns
+    applications on and verifies identity documents; otherwise every
+    `applications` command answers 503 APPLICATIONS_DISABLED.
     defaultCountryCode is the club's country calling code, one to three
     digits without "+" (e.g. "91"): the club apps put it in front of a phone
     number typed without one. It is null when the deployment sets none.
@@ -494,22 +541,161 @@ def me_submit_for_review(ctx: Context):
     print_response(response)
 
 
+# ── The extended profile (club_server#92, cli #38) ──────────────────────
+
+# option → field, for the extended profile's free-text and choice fields.
+EXTENDED_TEXT_FIELDS = {
+    "club_district": "clubDistrict",
+    "preferred_position": "preferredPosition",
+    "past_experience": "pastExperience",
+    "nationality": "nationality",
+    "preferred_language": "preferredLanguage",
+}
+GUARDIAN_PARTS = {"guardian_name": "name", "guardian_relation": "relation", "guardian_phone": "phone"}
+# What `--clear` takes → the field it sends as null.
+EXTENDED_CLEARABLE = {
+    "club-district": "clubDistrict",
+    "preferred-position": "preferredPosition",
+    "past-experience": "pastExperience",
+    "nationality": "nationality",
+    "preferred-language": "preferredLanguage",
+    "guardian": "guardian",
+    "membership-date": "membershipDateUtc",
+}
+
+EXTENDED_PROFILE_HELP = """Extended profile (club_server#92): each option sets one field; --clear
+    FIELD (repeatable) sends it as null; a field not named is left as it
+    is. The options join the JSON body, if one is given; a field named
+    twice is refused. --preferred-position and --preferred-language must
+    be one of the club's options (`profile-options get`), or the server
+    refuses with 422 INVALID_PROFILE_OPTION. The guardian is one field
+    server-side: --guardian-name/-relation/-phone are merged into the
+    stored guardian (or the JSON's), and an empty value clears that part.
+    --membership-date (YYYY-MM-DD, stored as UTC midnight) is an admin's
+    alone: anyone else gets 403 PROTECTED_FIELDS. A user not yet approved
+    may set their own extended fields, and nothing else. The fields are
+    stored whatever `capabilities` says of extendedProfile."""
+
+PRIVATE_PROFILE_HELP = """The private record (self, staff or admin) carries the extended profile
+    (club_server#92), each null until set: clubDistrict, preferredPosition,
+    pastExperience, nationality, preferredLanguage, guardian {name,
+    relation, phone} and membershipDateUtc (UTC midnight, ms; set on
+    approval when blank)."""
+
+
+def extended_profile_help(command):
+    """Fill {EXTENDED_PROFILE_HELP} / {PRIVATE_PROFILE_HELP} in a command's docstring; goes directly above the `def`."""
+    command.__doc__ = (
+        command.__doc__
+        .replace("{EXTENDED_PROFILE_HELP}", EXTENDED_PROFILE_HELP)
+        .replace("{PRIVATE_PROFILE_HELP}", PRIVATE_PROFILE_HELP)
+    )
+    return command
+
+
+def extended_profile_options(command):
+    """The extended profile's options, for `user update` and `me update`."""
+    options = [
+        click.option("--club-district", help="Club / district."),
+        click.option("--preferred-position", help="One of the club's positions (its value)."),
+        click.option("--past-experience", help="Past experience; may span lines."),
+        click.option("--nationality", help="Nationality."),
+        click.option("--preferred-language", help="One of the club's languages."),
+        click.option("--guardian-name", help="Guardian's name; '' clears it."),
+        click.option("--guardian-relation", help="Guardian's relation to the member; '' clears it."),
+        click.option("--guardian-phone", help="Guardian's phone, checked like the member's; '' clears it."),
+        click.option("--membership-date", help="Membership date, YYYY-MM-DD (admin only)."),
+        click.option(
+            "--clear", "clear", multiple=True, type=click.Choice(sorted(EXTENDED_CLEARABLE)),
+            help="Send this extended field as null (repeatable).",
+        ),
+    ]
+    for option in reversed(options):
+        command = option(command)
+    return command
+
+
+def utc_midnight_ms(day: str) -> int:
+    """A YYYY-MM-DD date as the UTC midnight the server stores, in ms."""
+    try:
+        parsed = datetime.strptime(day, "%Y-%m-%d")
+    except ValueError:
+        raise click.UsageError(f"--membership-date takes a date as YYYY-MM-DD, not {day!r}.")
+    return int(parsed.replace(tzinfo=timezone.utc).timestamp() * 1000)
+
+
+def apply_extended_profile(
+    ctx: "Context", username: str, data: dict[str, Any], options: dict[str, Any],
+) -> dict[str, Any]:
+    """The PATCH body: ``data`` plus the extended-profile options.
+
+    Guardian parts are merged into the JSON's guardian when it has one, or
+    else into the stored one (read from the private profile, or from
+    auth/me for oneself).
+    """
+    changes: dict[str, Any] = {}
+    for option, field in EXTENDED_TEXT_FIELDS.items():
+        if options.get(option) is not None:
+            changes[field] = options[option]
+    if options.get("membership_date") is not None:
+        changes["membershipDateUtc"] = utc_midnight_ms(options["membership_date"])
+    parts = {part: options[o] for o, part in GUARDIAN_PARTS.items() if options.get(o) is not None}
+    if parts:
+        changes["guardian"] = parts
+    for field in (EXTENDED_CLEARABLE[name] for name in options.get("clear") or ()):
+        if field in changes:
+            raise click.UsageError(f"{field} is given twice: an option sets it and --clear clears it.")
+        changes[field] = None
+    for field in changes:
+        if field in data and not (field == "guardian" and parts):
+            raise click.UsageError(f"{field} is given twice: in the JSON and as an option.")
+
+    if parts:
+        if "guardian" in data:
+            base = data["guardian"] or {}
+        else:
+            # One's own record through auth/me, which a user not yet approved may read too.
+            if username == ctx.username:
+                current = httpx.get(f"{ctx.base_url}/v1/auth/me", headers=ctx.headers)
+            else:
+                current = httpx.get(f"{ctx.base_url}/v1/users/by_id/{username}/private", headers=ctx.headers)
+            if current.status_code != 200:
+                print_response(current)
+                raise click.ClickException("could not read the stored guardian to merge into.")
+            base = current.json().get("guardian") or {}
+        changes["guardian"] = {**base, **{part: (value or None) for part, value in parts.items()}}
+    return {**data, **changes}
+
+
+def patch_profile(ctx: "Context", username: str, data: dict[str, Any], options: dict[str, Any]) -> None:
+    """PATCH a user's profile with ``data`` and the extended-profile options."""
+    body = apply_extended_profile(ctx, username, data, options)
+    if not body:
+        raise click.UsageError("Nothing to update: pass a JSON body or an extended-profile option.")
+    response = httpx.patch(f"{ctx.base_url}/v1/users/by_id/{username}", json=body, headers=ctx.headers)
+    print_response(response)
+
+
 @me.command("update")
-@click.argument("json_input")
+@click.argument("json_input", required=False)
+@extended_profile_options
 @pass_context
-def me_update(ctx: Context, json_input: str):
+@extended_profile_help
+def me_update(ctx: Context, json_input: str | None, **options: Any):
     """Update your own profile (PATCH /v1/users/by_id/<self>).
 
+    JSON_INPUT (optional) is a file, '-' for stdin, or inline JSON; its
+    dateOfBirth may be a local ISO time.
+
+    {EXTENDED_PROFILE_HELP}
+
     Example: --user alice --pw s3cret me update profile.json
+    Example: --user alice --pw s3cret me update --nationality Indian --preferred-language Marathi
+    Example: --user alice --pw s3cret me update --guardian-name Ravi --guardian-relation Father --guardian-phone 9000000001
+    Example: --user alice --pw s3cret me update --clear past-experience
     """
-    data = parse_json_input(json_input)
-    data = convert_timestamps(data)
-    response = httpx.patch(
-        f"{ctx.base_url}/v1/users/by_id/{ctx.username}",
-        json=data,
-        headers=ctx.headers,
-    )
-    print_response(response)
+    data = convert_timestamps(parse_json_input(json_input)) if json_input is not None else {}
+    patch_profile(ctx, ctx.username, data, options)
 
 
 @me.command("reapply")
@@ -951,8 +1137,11 @@ def users_count(ctx: Context) -> None:
 @click.argument("username")
 @click.option("--public-only", is_flag=True, help="Get public profile only")
 @pass_context
+@extended_profile_help
 def user_get(ctx: Context, username: str, public_only: bool):
-    """Get user details by username.
+    """Get user details by username: the private record unless --public-only.
+
+    {PRIVATE_PROFILE_HELP}
 
     Example: user get coach_member
     Example: user get coach_member --public-only
@@ -966,17 +1155,23 @@ def user_get(ctx: Context, username: str, public_only: bool):
 
 @user.command("update")
 @click.argument("username")
-@click.argument("json_input")
+@click.argument("json_input", required=False)
+@extended_profile_options
 @pass_context
-def user_update(ctx: Context, username: str, json_input: str):
-    """Update a user profile from JSON file or inline JSON."""
-    data = parse_json_input(json_input)
-    response = httpx.patch(
-        f"{ctx.base_url}/v1/users/by_id/{username}",
-        json=data,
-        headers=ctx.headers,
-    )
-    print_response(response)
+@extended_profile_help
+def user_update(ctx: Context, username: str, json_input: str | None, **options: Any):
+    """Update a user profile from JSON file or inline JSON, and/or options (self or admin).
+
+    {EXTENDED_PROFILE_HELP}
+
+    Example: user update alice '{"firstName": "Alice"}'
+    Example: user update alice --club-district Pune --preferred-position Forward
+    Example: user update alice --membership-date 2026-04-01
+    Example: user update alice --guardian-phone 9000000002
+    Example: user update alice --clear guardian --clear membership-date
+    """
+    data = parse_json_input(json_input) if json_input is not None else {}
+    patch_profile(ctx, username, data, options)
 
 
 # Shared by `user approve` and `user block`.
@@ -3284,6 +3479,341 @@ def preferences_set_key(ctx: Context, key: str, subkey: str, value: str):
 
 
 # ============================================================================
+# Profile options (the club's positions and languages, club_server#92)
+# ============================================================================
+
+
+@main.group("profile-options")
+def profile_options():
+    """The club's positions and languages, offered for a member's preferred position and language."""
+    pass
+
+
+def _profile_options_url(ctx: Context) -> str:
+    return f"{ctx.base_url}/v1/system/preferences/profile_options"
+
+
+@profile_options.command("get")
+@pass_context
+def profile_options_get(ctx: Context):
+    """The club's options: {positions: [{value, label: {lang: text}}], languages: [...]}.
+
+    Any signed-in user may read them, approved or not; both lists are empty
+    until an admin writes them.
+
+    Example: profile-options get
+    """
+    print_response(httpx.get(_profile_options_url(ctx), headers=ctx.headers))
+
+
+@profile_options.command("set")
+@click.option("--json", "json_value", help="The document as inline JSON")
+@click.option("--file", type=click.Path(exists=True, dir_okay=False), help="Read the document from a JSON file")
+@pass_context
+def profile_options_set(ctx: Context, json_value: str | None, file: str | None):
+    """Replace the club's positions and languages (admin) and print what is stored.
+
+    \b
+    The document, whole:
+      {"positions": [{"value": "Forward", "label": {"en": "Forward", "mr": "फॉरवर्ड"}}],
+       "languages": ["English", "Marathi"]}
+
+    A position's value is what a member's preferredPosition stores; its
+    label names it in each language a form may print it in. Values and
+    languages are distinct and non-empty (422 otherwise). A member's stored
+    choice whose option is removed later stays as it is. Answers 503
+    EXTENDED_PROFILE_DISABLED while `capabilities` reports extendedProfile
+    false.
+
+    Example: profile-options set --file profile_options.json
+    Example: profile-options set --json '{"positions": [], "languages": ["English"]}'
+    """
+    document = _parse_preference_value(json_value, file)
+    print_response(httpx.put(_profile_options_url(ctx), json=document, headers=ctx.headers))
+
+
+# ============================================================================
+# Applications (printable application forms, club_server#93)
+# ============================================================================
+
+APPLICATION_STATUSES = ["draft", "saved", "published"]
+
+APPLICATION_TEMPLATE_HELP = """\b
+    The template, every field optional on create:
+      languages      ["en"] or ["en", "mr"|"hi"]: the form's print languages
+      facts          {name: {"type": "date"|"time"|"amount"|"name"|"choices", "value": ...}}
+                     or {name: {"type": "date_range", "from": ms, "to": ms}};
+                     dates are UTC-midnight ms, a time "H:MM", an amount a
+                     whole number, a name text or {lang: text}, choices a
+                     list of the library's choice ids
+      organisation, title, subtitle, declaration, formFooter   a printed text
+      header         a list of printed texts (an item may be a list: one per line)
+      ageCategories  [{"label": {lang: text}, "bornOnOrAfterUtc"?, "bornOnOrBeforeUtc"?,
+                       "genders"?: ["male"|"female"|"other"|"prefer_not_to_say"]}]
+      selections     a list of printed texts
+      terms          [{"clause": id, "args"?} | {"heading": text, "body": text}]
+      termsNotes     [{"clause": id, "args"?} | {"text": text, "attribution"?: text}]
+      labelOverrides {label id: {lang: text}}  (ids from `applications labels`)
+    A printed text is {lang: text}, a library clause {"clause": id, "args":
+    {gap: fact}} (`applications clauses`), or a fact on its own {"fact": name}.
+    A shape that does not fit → 422."""
+
+
+def application_template_help(command):
+    """Fill {APPLICATION_TEMPLATE_HELP} in a command's docstring; goes directly above the `def`."""
+    command.__doc__ = command.__doc__.replace("{APPLICATION_TEMPLATE_HELP}", APPLICATION_TEMPLATE_HELP)
+    return command
+
+
+@main.group()
+def applications():
+    """Printable application forms built from admin-written templates (optional module).
+
+    A template moves draft → saved → published: `save` checks it is complete
+    and decides its layout, `publish` offers it to members, `unpublish` takes
+    it back to saved, `revert` takes a saved one back to draft (editable
+    again). A move from another state → 422 INVALID_TRANSITION. Admins see
+    and write every template; a member who has uploaded an identity document
+    sees the published ones and downloads their own form (`form`). Every
+    PDF is drawn per request. While `capabilities` reports applications
+    false, every command answers 503 APPLICATIONS_DISABLED.
+    """
+    pass
+
+
+def _application_url(ctx: Context, application_id: int | None = None) -> str:
+    if application_id is None:
+        return f"{ctx.base_url}/v1/applications"
+    return f"{ctx.base_url}/v1/applications/{application_id}"
+
+
+def _write_pdf(response: httpx.Response, output: str | None, fallback: str) -> None:
+    """Write a form PDF to ``output``, or else to the server's file name (or ``fallback``) in cwd."""
+    if response.status_code != 200:
+        print_response(response)
+        return
+    path = output
+    if not path:
+        disposition = response.headers.get("content-disposition") or ""
+        named = disposition.split('filename="', 1)[1].split('"', 1)[0] if 'filename="' in disposition else ""
+        # Only a name, never a path the server chose.
+        path = Path(named).name or fallback
+    with open(path, "wb") as f:
+        f.write(response.content)
+    click.echo(f"Downloaded to {path}")
+
+
+@applications.command("list")
+@click.option("--status", type=click.Choice(APPLICATION_STATUSES), help="Only templates in this state (admins).")
+@click.option("--offset", default=0, show_default=True, help="Pagination offset")
+@click.option("--limit", default=20, show_default=True, help="Pagination limit (1-100)")
+@pass_context
+def applications_list(ctx: Context, status: str | None, offset: int, limit: int):
+    """List templates: {items, total, offset, limit}.
+
+    Admins see every state (--status narrows it). Anyone else signed in,
+    approved or not, sees the published ones, and none until they have
+    uploaded an identity document.
+
+    Example: applications list --status draft
+    """
+    params: dict[str, Any] = {"offset": offset, "limit": limit}
+    if status:
+        params["status"] = status
+    print_response(httpx.get(_application_url(ctx), params=params, headers=ctx.headers))
+
+
+@applications.command("show")
+@click.argument("application_id", type=int)
+@pass_context
+def applications_show(ctx: Context, application_id: int):
+    """One template: its content, status, layout (once saved), createdBy and times.
+
+    A member reads published ones only (404 APPLICATION_NOT_FOUND otherwise),
+    and needs an identity document (422 IDENTITY_DOCUMENT_REQUIRED).
+
+    Example: applications show 3
+    """
+    print_response(httpx.get(_application_url(ctx, application_id), headers=ctx.headers))
+
+
+@applications.command("create")
+@click.option("--json", "json_value", help="The template as inline JSON")
+@click.option("--file", type=click.Path(exists=True, dir_okay=False), help="Read the template from a JSON file")
+@pass_context
+@application_template_help
+def applications_create(ctx: Context, json_value: str | None, file: str | None):
+    """Create a template (admin); it starts as a draft.
+
+    {APPLICATION_TEMPLATE_HELP}
+
+    Example: applications create --file trial.json
+    Example: applications create --json '{"title": {"en": "Registration"}}'
+    """
+    document = _parse_preference_value(json_value, file)
+    print_response(httpx.post(_application_url(ctx), json=document, headers=ctx.headers))
+
+
+@applications.command("update")
+@click.argument("application_id", type=int)
+@click.option("--json", "json_value", help="The fields to change, as inline JSON")
+@click.option("--file", type=click.Path(exists=True, dir_okay=False), help="Read the fields from a JSON file")
+@pass_context
+@application_template_help
+def applications_update(ctx: Context, application_id: int, json_value: str | None, file: str | None):
+    """Change a draft (admin): each field sent replaces the stored one, null clears it.
+
+    A field left out keeps its value. A saved or published template → 422
+    INVALID_STATE (`applications revert` a saved one first).
+
+    {APPLICATION_TEMPLATE_HELP}
+
+    Example: applications update 3 --json '{"subtitle": null}'
+    Example: applications update 3 --file trial.json
+    """
+    document = _parse_preference_value(json_value, file)
+    print_response(httpx.patch(_application_url(ctx, application_id), json=document, headers=ctx.headers))
+
+
+@applications.command("delete")
+@click.argument("application_id", type=int)
+@pass_context
+def applications_delete(ctx: Context, application_id: int):
+    """Soft-delete a draft or saved template (admin); a published one → 422 INVALID_STATE.
+
+    Example: applications delete 3
+    """
+    print_response(httpx.delete(_application_url(ctx, application_id), headers=ctx.headers))
+
+
+@applications.command("duplicate")
+@click.argument("application_id", type=int)
+@pass_context
+def applications_duplicate(ctx: Context, application_id: int):
+    """Copy any template, in any state, into a new draft with no layout (admin).
+
+    Example: applications duplicate 3
+    """
+    print_response(httpx.post(f"{ctx.base_url}/v1/applications/{application_id}/duplicate", headers=ctx.headers))
+
+
+@applications.command("save")
+@click.argument("application_id", type=int)
+@pass_context
+def applications_save(ctx: Context, application_id: int):
+    """Draft → saved (admin): checked complete, the layout decided and stored.
+
+    Refused, and left a draft, with 422 APPLICATION_INCOMPLETE (details.missing
+    names each text lacking details.language), APPLICATION_INVALID_REFERENCE
+    (an unknown clause, a missing fact, a fact of the wrong type) or
+    APPLICATION_DOES_NOT_FIT (details.overflowPt: the details alone overflow
+    page 1 by that many points).
+
+    Example: applications save 3
+    """
+    print_response(httpx.post(f"{ctx.base_url}/v1/applications/{application_id}/save", headers=ctx.headers))
+
+
+@applications.command("publish")
+@click.argument("application_id", type=int)
+@pass_context
+def applications_publish(ctx: Context, application_id: int):
+    """Saved → published (admin): members see it and download their forms.
+
+    Example: applications publish 3
+    """
+    print_response(httpx.post(f"{ctx.base_url}/v1/applications/{application_id}/publish", headers=ctx.headers))
+
+
+@applications.command("unpublish")
+@click.argument("application_id", type=int)
+@pass_context
+def applications_unpublish(ctx: Context, application_id: int):
+    """Published → saved (admin): members no longer see it.
+
+    Example: applications unpublish 3
+    """
+    print_response(httpx.post(f"{ctx.base_url}/v1/applications/{application_id}/unpublish", headers=ctx.headers))
+
+
+@applications.command("revert")
+@click.argument("application_id", type=int)
+@pass_context
+def applications_revert(ctx: Context, application_id: int):
+    """Saved → draft (admin): editable again; the stored layout is dropped.
+
+    Example: applications revert 3
+    """
+    print_response(httpx.post(f"{ctx.base_url}/v1/applications/{application_id}/revert", headers=ctx.headers))
+
+
+@applications.command("labels")
+@pass_context
+def applications_labels(ctx: Context):
+    """The label catalogue (admin): {languages, labels: {id: {lang: text}}}.
+
+    A template's labelOverrides replace a label by its id.
+
+    Example: applications labels
+    """
+    print_response(httpx.get(f"{ctx.base_url}/v1/applications/labels", headers=ctx.headers))
+
+
+@applications.command("clauses")
+@pass_context
+def applications_clauses(ctx: Context):
+    """The clause library (admin): {languages, choices, clauses: {id: {kind, gaps, heading?, text}}}.
+
+    Each clause's gaps name the fact type each takes; a template's text uses
+    one as {"clause": id, "args": {gap: fact}}.
+
+    Example: applications clauses
+    """
+    print_response(httpx.get(f"{ctx.base_url}/v1/applications/clauses", headers=ctx.headers))
+
+
+@applications.command("preview")
+@click.argument("application_id", type=int)
+@click.option("--output", "-o", help="Output file (default: the server's name, application-<id>-<demo member>.pdf)")
+@pass_context
+def applications_preview(ctx: Context, application_id: int, output: str | None):
+    """Draw a template in any state as a PDF for the demo member, watermarked PREVIEW (admin).
+
+    A draft is measured on the spot; a saved or published one uses its
+    stored layout. Prints the path written.
+
+    Example: applications preview 3 -o preview.pdf
+    """
+    response = httpx.get(f"{ctx.base_url}/v1/applications/{application_id}/preview", headers=ctx.headers)
+    _write_pdf(response, output, f"application-{application_id}-preview.pdf")
+
+
+@applications.command("form")
+@click.argument("application_id", type=int)
+@click.option("--user", "username", help="Download this member's form (admin); default: your own")
+@click.option("--output", "-o", help="Output file (default: application-<id>-<username>.pdf)")
+@pass_context
+def applications_form(ctx: Context, application_id: int, username: str | None, output: str | None):
+    """Download a filled form of a published application as a PDF.
+
+    Without --user, your own form: you need an identity document (422
+    IDENTITY_DOCUMENT_REQUIRED) and, if the template has age categories, to
+    match one by date of birth and gender (422 APPLICATION_NOT_ELIGIBLE).
+    With --user (admin), that member's form: an unpublished template → 422
+    APPLICATION_NOT_PUBLISHED, an unknown user → 404 USER_NOT_FOUND. Prints
+    the path written.
+
+    Example: applications form 3
+    Example: applications form 3 --user alice -o alice.pdf
+    """
+    if username:
+        response = httpx.get(f"{ctx.base_url}/v1/applications/{application_id}/form/{username}", headers=ctx.headers)
+    else:
+        response = httpx.get(f"{ctx.base_url}/v1/applications/{application_id}/form", headers=ctx.headers)
+    _write_pdf(response, output, f"application-{application_id}-{username or ctx.username}.pdf")
+
+
+# ============================================================================
 # Staff Listing Commands (curation of the public coach listing, admin)
 # ============================================================================
 
@@ -4497,8 +5027,11 @@ def upload_download(ctx: Context, uuid: str, variant: str, output: str | None, h
 @user.command("private")
 @click.argument("username")
 @pass_context
+@extended_profile_help
 def user_private(ctx: Context, username: str):
     """A user's private record: contact details, address, status (self or admin).
+
+    {PRIVATE_PROFILE_HELP}
 
     Example: user private alice
     """
