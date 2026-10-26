@@ -1727,20 +1727,32 @@ def event_drop(ctx: Context, event_id: int, reason: str, version: int | None):
     })
 
 
+# A schedule write that clashes with another event answers 409 SCHEDULE_CONFLICT
+# and saves nothing unless the body says acceptConflicts (club_server#72).
+ACCEPT_CONFLICTS_OPTION = click.option(
+    "--accept-conflicts", "accept_conflicts", is_flag=True, default=False,
+    help="Save even though the schedule clashes with other events (otherwise 409 SCHEDULE_CONFLICT).",
+)
+
+
 @event.command("reinstate")
 @click.argument("event_id", type=int)
 @click.option("--version", "version", type=int, help="Occurrence version to send (default: read from the occurrence).")
+@ACCEPT_CONFLICTS_OPTION
 @pass_context
-def event_reinstate(ctx: Context, event_id: int, version: int | None):
+def event_reinstate(ctx: Context, event_id: int, version: int | None, accept_conflicts: bool):
     """Restore a dropped one-off while it has not started (422 INVALID_STATE afterwards).
 
     Carries the occurrence's version (read unless --version is given).
+    409 SCHEDULE_CONFLICT when its slot now clashes with another event; send
+    again with --accept-conflicts to reinstate it anyway.
 
     Example: event reinstate 123
     """
-    post_event_verb(ctx, event_id, "reinstate", {
-        "version": oneoff_occurrence_version(ctx, event_id, version),
-    })
+    data: dict[str, Any] = {"version": oneoff_occurrence_version(ctx, event_id, version)}
+    if accept_conflicts:
+        data["acceptConflicts"] = True
+    post_event_verb(ctx, event_id, "reinstate", data)
 
 
 @event.command("correct")
@@ -2142,6 +2154,7 @@ def occurrences_undo_cancel(ctx: Context, event_id: int, occurrence_time_local: 
 @click.option("--duration-minutes", type=int, help="New duration in minutes")
 @click.option("--venue-id", type=int, help="New venue ID")
 @OCCURRENCE_VERSION_OPTION
+@ACCEPT_CONFLICTS_OPTION
 @pass_context
 def occurrences_reschedule(
     ctx: Context,
@@ -2151,13 +2164,16 @@ def occurrences_reschedule(
     duration_minutes: int | None,
     venue_id: int | None,
     version: int | None,
+    accept_conflicts: bool,
 ):
     """Reschedule one occurrence: later start, new duration and/or venue.
 
     422 POSTPONE_ONLY when the new start is earlier; 400 RESCHEDULE_LEAD_TIME_VIOLATED
     inside the 30 minutes before the effective start; 422 CANCELLED_OCCURRENCE when
     the slot is cancelled or past the event's cutoff; 422 INVALID_SESSIONS for a
-    duration change on a schedule that carries a timetable.
+    duration change on a schedule that carries a timetable; 409 SCHEDULE_CONFLICT
+    when the new slot clashes with another event (send again with --accept-conflicts
+    to save it anyway).
 
     Example: occurrences reschedule 6031 "20260503 0030" --start-time-local "2026-05-03T02:00:00"
     Carries the occurrence's version (read unless --version is given);
@@ -2175,6 +2191,8 @@ def occurrences_reschedule(
         data["newDurationMinutes"] = duration_minutes
     if venue_id is not None:
         data["newVenueId"] = venue_id
+    if accept_conflicts:
+        data["acceptConflicts"] = True
     response = httpx.post(
         f"{ctx.base_url}/v1/events/by_id/{event_id}/occurrences/{occurrence_time_utc}/reschedule",
         json=data,

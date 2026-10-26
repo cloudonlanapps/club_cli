@@ -120,3 +120,24 @@ def test_issue_33_stale_occurrence_version_is_explained(monkeypatch):
     assert res.exit_code != 0
     assert "STALE_VERSION: it is at version 5" in res.output
     assert "--version 5" in res.output
+
+
+def test_issue_34_reschedule_accepts_a_schedule_clash_when_asked(monkeypatch):
+    """--accept-conflicts saves despite a clash (club_server#72); without it nothing extra is sent."""
+    fake = _fake(monkeypatch)
+    fake.on("POST", PATH, status=204)
+
+    res = run("occurrences", "reschedule", "7", SLOT, "--venue-id", "9", "--accept-conflicts")
+
+    assert res.exit_code == 0, res.output
+    assert fake.calls_to("POST", PATH)[0].json == {
+        "newVenueId": 9,
+        "version": 4,
+        "acceptConflicts": True,
+    }
+
+
+def test_issue_34_reschedule_help_names_the_schedule_conflict():
+    out = run("occurrences", "reschedule", "--help").output
+    assert "--accept-conflicts" in out
+    assert "SCHEDULE_CONFLICT" in out
