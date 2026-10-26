@@ -40,6 +40,14 @@ options, so seed those first:
 just profile_options seeds/profile_options.json
 ```
 
+An application template (club_server#93) is seeded from its JSON, the body
+`applications create` takes; `just application` skips one whose English title
+a live template already has, and leaves the new one a draft:
+
+```bash
+just application seeds/applications/selection_trial.json
+```
+
 Where the deployment does not verify identity (`capabilities` reports
 `identityVerification: false`), a registered user is already `pending`: the
 `member` recipe then skips the document upload and submit-for-review and goes
@@ -60,7 +68,7 @@ nothing else. It runs the suite twice, each time against a fresh club_server
 cloned at `main` by `background_server.sh` from
 [native_deploy](https://github.com/cloudonlanapps/native_deploy):
 `cli_test.conf` has every optional module on (credits, evaluations, event
-marketing, identity verification, the extended profile) and `cli_test_modules_off.conf` has them
+marketing, identity verification, the extended profile, applications) and `cli_test_modules_off.conf` has them
 all off. Point a conf's `source` at a local checkout to test uncommitted
 server changes.
 
@@ -112,6 +120,36 @@ change alone. `profile-options set` replaces the club's positions and
 languages, which `--preferred-position` and `--preferred-language` must be
 one of; it answers 503 while `capabilities` reports `extendedProfile` false.
 The fields are stored, and shown by `user get` / `user private`, either way.
+
+## Applications
+
+`applications` wraps the printable application forms (club_server#93). An
+admin writes a template as JSON (`applications create --help` shows its
+shape), moves it draft → saved → published, and previews it at any state; a
+member who has uploaded an identity document lists the published ones and
+downloads their own form.
+
+```bash
+club_client -u sudo --pw <pw> applications labels          # the label catalogue
+club_client -u sudo --pw <pw> applications clauses         # the clause library and its gaps
+club_client -u sudo --pw <pw> applications create --file trial.json
+club_client -u sudo --pw <pw> applications update 3 --json '{"subtitle": null}'
+club_client -u sudo --pw <pw> applications preview 3 -o preview.pdf
+club_client -u sudo --pw <pw> applications save 3          # or unpublish / revert / duplicate / delete
+club_client -u sudo --pw <pw> applications publish 3
+club_client -u sudo --pw <pw> applications list --status published --limit 50
+club_client -u sudo --pw <pw> applications form 3 --user alice
+club_client -u alice --pw <pw> applications form 3         # writes application-3-alice.pdf
+```
+
+The PDF commands write `-o FILE`, or by default `application-<id>-<username>.pdf`
+in the current directory, and print the path. `save` is refused with
+`APPLICATION_INCOMPLETE` (the texts missing a print language are named),
+`APPLICATION_INVALID_REFERENCE` or `APPLICATION_DOES_NOT_FIT` (the overflow in
+points); each refusal gets a one-line hint on stderr. Applications need
+`APPLICATIONS_ENABLED` and `IDENTITY_VERIFICATION_REQUIRED` both on; otherwise
+`capabilities` reports `applications: false` and every command answers 503
+`APPLICATIONS_DISABLED`.
 
 ## Encrypt existing media (at rest)
 
