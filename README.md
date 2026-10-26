@@ -31,6 +31,15 @@ apply afterwards: `profile` (via `me update`), `identity-document` (via
 `me gallery add-file`) and `staffListing` (`{position, guest, hidden}` on the
 public staff listing, via `staff set`; the `coach` recipes apply it).
 
+The `profile` block may carry the extended profile too (`clubDistrict`,
+`preferredPosition`, `pastExperience`, `nationality`, `preferredLanguage`,
+`guardian`); a preferred position or language must be one of the club's
+options, so seed those first:
+
+```bash
+just profile_options seeds/profile_options.json
+```
+
 Where the deployment does not verify identity (`capabilities` reports
 `identityVerification: false`), a registered user is already `pending`: the
 `member` recipe then skips the document upload and submit-for-review and goes
@@ -51,7 +60,7 @@ nothing else. It runs the suite twice, each time against a fresh club_server
 cloned at `main` by `background_server.sh` from
 [native_deploy](https://github.com/cloudonlanapps/native_deploy):
 `cli_test.conf` has every optional module on (credits, evaluations, event
-marketing, identity verification) and `cli_test_modules_off.conf` has them
+marketing, identity verification, the extended profile) and `cli_test_modules_off.conf` has them
 all off. Point a conf's `source` at a local checkout to test uncommitted
 server changes.
 
@@ -82,6 +91,27 @@ NATIVE_DEPLOY_REF=<branch-or-commit> just test
 
 `just test` sets `CLUB_REQUIRE_SERVER=1`, so a stack that did not come up
 fails the run instead of skipping the live tests into a green result.
+
+## Extended profile
+
+Every extended field of a profile (club_server#92) has an option on
+`user update` and `me update`, beside or instead of the JSON body; `--clear
+<field>` sends one as null. `--membership-date` is an admin's alone.
+
+```bash
+club_client -u sudo --pw <pw> user update alice --club-district Pune --preferred-position Forward \
+  --guardian-name Ravi --guardian-relation Father --guardian-phone 9000000001
+club_client -u sudo --pw <pw> user update alice --membership-date 2026-04-01
+club_client -u alice --pw <pw> me update --nationality Indian --clear past-experience
+club_client -u sudo --pw <pw> profile-options get
+club_client -u sudo --pw <pw> profile-options set --file profile_options.json
+```
+
+The guardian options are merged into the stored guardian, so one part can
+change alone. `profile-options set` replaces the club's positions and
+languages, which `--preferred-position` and `--preferred-language` must be
+one of; it answers 503 while `capabilities` reports `extendedProfile` false.
+The fields are stored, and shown by `user get` / `user private`, either way.
 
 ## Encrypt existing media (at rest)
 
