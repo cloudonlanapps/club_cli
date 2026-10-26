@@ -178,6 +178,23 @@ def test_issue_17_reinstate(monkeypatch):
     assert call.json == {"version": 3}
 
 
+def test_issue_34_reinstate_accepts_a_schedule_clash_when_asked(monkeypatch):
+    """--accept-conflicts saves despite a clash (club_server#72); without it nothing extra is sent."""
+    fake = _oneoff(_fake(monkeypatch, "reinstate"))
+
+    res = run("event", "reinstate", "7", "--accept-conflicts")
+
+    assert res.exit_code == 0, res.output
+    (call,) = fake.calls_to("POST", f"{EVENT}/reinstate")
+    assert call.json == {"version": 3, "acceptConflicts": True}
+
+
+def test_issue_34_reinstate_help_names_the_schedule_conflict():
+    out = run("event", "reinstate", "--help").output
+    assert "--accept-conflicts" in out
+    assert "SCHEDULE_CONFLICT" in out
+
+
 def test_issue_33_drop_and_reinstate_send_the_occurrence_version_not_the_events(monkeypatch):
     """The event is at 9 and its occurrence at 3: drop carries 3 (club_server#430)."""
     fake = _oneoff(_fake(monkeypatch, "drop", "reinstate"), occurrence_version=3)
