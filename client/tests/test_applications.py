@@ -234,11 +234,14 @@ def test_issue_38_a_refused_form_writes_nothing(monkeypatch, tmp_path):
 # ── Refusals ────────────────────────────────────────────────────────────
 
 
-def test_issue_38_incomplete_hint_names_the_missing_texts(monkeypatch):
+def test_issue_50_incomplete_hint_names_each_text_with_its_languages(monkeypatch):
     fake = FakeHttp().install(monkeypatch)
     fake.on(
         "POST", f"{A}/7/save",
-        _refusal("APPLICATION_INCOMPLETE", missing=["formFooter", "terms[3].body"], language="mr"),
+        _refusal("APPLICATION_INCOMPLETE", missing=[
+            {"field": "formFooter", "languages": ["mr"]},
+            {"field": "terms[3].body", "languages": ["en", "mr"]},
+        ]),
         status=422,
     )
 
@@ -247,8 +250,19 @@ def test_issue_38_incomplete_hint_names_the_missing_texts(monkeypatch):
     assert res.exit_code != 0
     hint = res.stderr.strip().splitlines()[-1]
     assert hint.startswith("APPLICATION_INCOMPLETE:")
-    assert "formFooter, terms[3].body" in hint
-    assert "mr" in hint
+    assert hint.endswith("Missing: formFooter (mr); terms[3].body (en, mr).")
+    assert "None" not in hint
+
+
+def test_issue_50_incomplete_hint_without_details_is_just_the_hint(monkeypatch):
+    fake = FakeHttp().install(monkeypatch)
+    fake.on("POST", f"{A}/7/save", _refusal("APPLICATION_INCOMPLETE"), status=422)
+
+    res = run("applications", "save", "7")
+
+    hint = res.stderr.strip().splitlines()[-1]
+    assert hint.startswith("APPLICATION_INCOMPLETE:")
+    assert "Missing" not in hint
 
 
 def test_issue_38_does_not_fit_hint_gives_the_overflow(monkeypatch):
