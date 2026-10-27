@@ -2,7 +2,9 @@
 
 `user update` and `me update` take an option for every extended field, a
 `--clear` for each, and `--membership-date` (admin); `profile-options get` /
-`set` read and replace the club's positions and languages.
+`set` read and replace the club's positions and languages. Preferred positions
+and languages are lists (club_server#106, cli #44), and the options are
+written through the super admin's preference PATCH (club_server#98).
 """
 from __future__ import annotations
 
@@ -17,22 +19,21 @@ from .fakes import FakeHttp, run
 
 ALICE = "/v1/users/by_id/alice"
 OPTIONS = "/v1/system/preferences/profile_options"
+OPTIONS_WRITE = "/v1/admin/preferences/profile_options"
 APRIL_1_2026_UTC_MS = 1775001600000
 
 TEXT_OPTIONS = [
     ("--club-district", "clubDistrict", "Pune District"),
-    ("--preferred-position", "preferredPosition", "Forward"),
     ("--past-experience", "pastExperience", "Two seasons\nat the rink"),
     ("--nationality", "nationality", "Indian"),
-    ("--preferred-language", "preferredLanguage", "Marathi"),
 ]
 
 CLEARS = [
     ("club-district", "clubDistrict"),
-    ("preferred-position", "preferredPosition"),
+    ("preferred-position", "preferredPositions"),
     ("past-experience", "pastExperience"),
     ("nationality", "nationality"),
-    ("preferred-language", "preferredLanguage"),
+    ("preferred-language", "preferredLanguages"),
     ("guardian", "guardian"),
     ("membership-date", "membershipDateUtc"),
 ]
@@ -202,7 +203,7 @@ def test_issue_38_me_update_takes_the_same_options_for_self(monkeypatch):
 
     assert res.exit_code == 0, res.output
     assert _patched(fake, "/v1/users/by_id/sudo") == {
-        "preferredLanguage": "Hindi",
+        "preferredLanguages": ["Hindi"],
         "guardian": {"name": "Ravi"},
         "pastExperience": None,
         "membershipDateUtc": APRIL_1_2026_UTC_MS,
@@ -236,6 +237,76 @@ def test_issue_38_update_help_names_every_extended_option(command):
     assert "PROTECTED_FIELDS" in text
 
 
+# ── preferred positions and languages as lists (club_server#106, cli #44) ──
+
+
+def test_issue_44_user_update_sends_positions_and_languages_as_lists(monkeypatch):
+    fake = FakeHttp().install(monkeypatch)
+    fake.on("PATCH", ALICE, {"username": "alice"})
+
+    res = run(
+        "user", "update", "alice",
+        "--preferred-position", "Forward", "--preferred-position", "Goalie",
+        "--preferred-language", "English", "--preferred-language", "Marathi",
+    )
+
+    assert res.exit_code == 0, res.output
+    assert _patched(fake) == {
+        "preferredPositions": ["Forward", "Goalie"],
+        "preferredLanguages": ["English", "Marathi"],
+    }
+
+
+def test_issue_44_one_position_is_still_a_list(monkeypatch):
+    fake = FakeHttp().install(monkeypatch)
+    fake.on("PATCH", "/v1/users/by_id/sudo", {"username": "sudo"})
+
+    res = run("me", "update", "--preferred-position", "Forward")
+
+    assert res.exit_code == 0, res.output
+    assert _patched(fake, "/v1/users/by_id/sudo") == {"preferredPositions": ["Forward"]}
+
+
+def test_issue_44_positions_given_and_cleared_are_refused(monkeypatch):
+    fake = FakeHttp().install(monkeypatch)
+
+    res = run("user", "update", "alice", "--preferred-position", "Forward", "--clear", "preferred-position")
+
+    assert res.exit_code != 0
+    assert "preferredPositions" in res.output
+    assert fake.calls == []
+
+
+def test_issue_44_positions_in_the_json_and_as_an_option_are_refused(monkeypatch):
+    fake = FakeHttp().install(monkeypatch)
+
+    res = run("user", "update", "alice", '{"preferredPositions": ["Goalie"]}', "--preferred-position", "Forward")
+
+    assert res.exit_code != 0
+    assert "given twice" in res.output
+    assert fake.calls == []
+
+
+@pytest.mark.parametrize("command", [["user", "update", "--help"], ["me", "update", "--help"]])
+def test_issue_44_update_help_says_the_choices_repeat(command):
+    res = CliRunner().invoke(main, command)
+
+    text = " ".join(res.output.split())
+    assert res.exit_code == 0
+    assert "preferredPositions" in text and "preferredLanguages" in text
+    assert "repeatable" in text
+    assert "preferredPosition " not in text and "preferredLanguage " not in text
+
+
+def test_issue_44_private_and_profile_options_help_name_the_lists():
+    private = " ".join(CliRunner().invoke(main, ["user", "private", "--help"]).output.split())
+    options = " ".join(CliRunner().invoke(main, ["profile-options", "set", "--help"]).output.split())
+
+    assert "preferredPositions" in private and "preferredLanguages" in private
+    assert "preferredPositions" in options
+    assert "super admin" in options
+
+
 # ── profile-options ─────────────────────────────────────────────────────
 
 DOCUMENT = {
@@ -254,26 +325,27 @@ def test_issue_38_profile_options_get(monkeypatch):
     assert json.loads(res.output) == DOCUMENT
 
 
-def test_issue_38_profile_options_set_from_file_puts_the_document(monkeypatch, tmp_path):
+def test_issue_44_profile_options_set_from_file_patches_the_preference(monkeypatch, tmp_path):
     fake = FakeHttp().install(monkeypatch)
-    fake.on("PUT", OPTIONS, DOCUMENT)
+    fake.on("PATCH", OPTIONS_WRITE, {"key": "profile_options", "value": DOCUMENT})
     path = tmp_path / "profile_options.json"
     path.write_text(json.dumps(DOCUMENT, ensure_ascii=False), encoding="utf-8")
 
     res = run("profile-options", "set", "--file", str(path))
 
     assert res.exit_code == 0, res.output
-    assert fake.calls_to("PUT", OPTIONS)[0].json == DOCUMENT
+    assert fake.calls_to("PATCH", OPTIONS_WRITE)[0].json == {"value": DOCUMENT}
+    assert fake.calls_to("PUT", OPTIONS) == []
 
 
-def test_issue_38_profile_options_set_from_inline_json(monkeypatch):
+def test_issue_44_profile_options_set_from_inline_json(monkeypatch):
     fake = FakeHttp().install(monkeypatch)
-    fake.on("PUT", OPTIONS, {"positions": [], "languages": []})
+    fake.on("PATCH", OPTIONS_WRITE, {"key": "profile_options", "value": {"positions": [], "languages": []}})
 
     res = run("profile-options", "set", "--json", '{"positions": [], "languages": []}')
 
     assert res.exit_code == 0, res.output
-    assert fake.calls_to("PUT", OPTIONS)[0].json == {"positions": [], "languages": []}
+    assert fake.calls_to("PATCH", OPTIONS_WRITE)[0].json == {"value": {"positions": [], "languages": []}}
 
 
 def test_issue_38_profile_options_set_needs_exactly_one_source(monkeypatch, tmp_path):
@@ -291,7 +363,7 @@ def test_issue_38_profile_options_set_needs_exactly_one_source(monkeypatch, tmp_
 
 def test_issue_38_profile_options_set_explains_the_disabled_module(monkeypatch):
     fake = FakeHttp().install(monkeypatch)
-    fake.on("PUT", OPTIONS, {"detail": {"code": "EXTENDED_PROFILE_DISABLED", "message": "off"}}, status=503)
+    fake.on("PATCH", OPTIONS_WRITE, {"detail": {"code": "EXTENDED_PROFILE_DISABLED", "message": "off"}}, status=503)
 
     res = run("profile-options", "set", "--json", '{"positions": [], "languages": []}')
 

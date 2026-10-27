@@ -32,8 +32,8 @@ apply afterwards: `profile` (via `me update`), `identity-document` (via
 public staff listing, via `staff set`; the `coach` recipes apply it).
 
 The `profile` block may carry the extended profile too (`clubDistrict`,
-`preferredPosition`, `pastExperience`, `nationality`, `preferredLanguage`,
-`guardian`); a preferred position or language must be one of the club's
+`preferredPositions`, `pastExperience`, `nationality`, `preferredLanguages`,
+`guardian`); each preferred position or language must be one of the club's
 options, so seed those first:
 
 ```bash
@@ -107,7 +107,8 @@ Every extended field of a profile (club_server#92) has an option on
 <field>` sends one as null. `--membership-date` is an admin's alone.
 
 ```bash
-club_client -u sudo --pw <pw> user update alice --club-district Pune --preferred-position Forward \
+club_client -u sudo --pw <pw> user update alice --club-district Pune \
+  --preferred-position Forward --preferred-position Goalie --preferred-language Marathi \
   --guardian-name Ravi --guardian-relation Father --guardian-phone 9000000001
 club_client -u sudo --pw <pw> user update alice --membership-date 2026-04-01
 club_client -u alice --pw <pw> me update --nationality Indian --clear past-experience
@@ -116,9 +117,13 @@ club_client -u sudo --pw <pw> profile-options set --file profile_options.json
 ```
 
 The guardian options are merged into the stored guardian, so one part can
-change alone. `profile-options set` replaces the club's positions and
-languages, which `--preferred-position` and `--preferred-language` must be
-one of; it answers 503 while `capabilities` reports `extendedProfile` false.
+change alone. `--preferred-position` and `--preferred-language` repeat, and
+are sent as the lists `preferredPositions` and `preferredLanguages`
+(club_server#106); each value must be one of the club's options.
+`profile-options set` replaces those options through the super admin's
+`PATCH /v1/admin/preferences/profile_options`, the same write as
+`preferences set profile_options` (club_server#98); it answers 503 while
+`capabilities` reports `extendedProfile` false.
 The fields are stored, and shown by `user get` / `user private`, either way.
 
 ## Applications
