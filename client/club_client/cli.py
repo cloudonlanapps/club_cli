@@ -595,8 +595,10 @@ EXTENDED_PROFILE_HELP = """Extended profile (club_server#92): each option sets o
     stored guardian (or the JSON's), and an empty value clears that part.
     --membership-date (YYYY-MM-DD, stored as UTC midnight) is an admin's
     alone: anyone else gets 403 PROTECTED_FIELDS. A user not yet approved
-    may set their own extended fields, and nothing else. The fields are
-    stored whatever `capabilities` says of extendedProfile."""
+    may edit their own profile except gender and date of birth, which
+    only an admin sets (403 PROTECTED_FIELDS); another user's profile is
+    403 ACCOUNT_NOT_ACTIVE (club_server#123). The fields are stored
+    whatever `capabilities` says of extendedProfile."""
 
 PRIVATE_PROFILE_HELP = """The private record (self, staff or admin) carries the extended profile
     (club_server#92), each null until set: clubDistrict, pastExperience,
