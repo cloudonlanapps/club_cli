@@ -112,6 +112,7 @@ def test_issue_38_capabilities_report_applications(live: Live):
     ("library", "list"), ("library", "get", "1"), ("library", "delete", "1"),
     ("library", "create", "--kind", "note", "--name", "n", "--text", "en", "x"),
     ("library", "update", "1", "--name", "n"),
+    ("blank-form", "1", "-o", "blank.pdf"),
 ])
 def test_issue_38_every_command_answers_503_while_off(live: Live, args):
     res = live.refused("applications", *args)
@@ -342,6 +343,52 @@ def test_issue_38_a_form_of_an_unpublished_template_is_refused(live: Live, tmp_p
 
     assert "APPLICATION_NOT_PUBLISHED" in res.output
     assert not (tmp_path / "x.pdf").exists()
+
+
+@pytest.mark.modules_on
+def test_issue_58_admin_writes_the_blank_form_of_a_saved_and_a_published_template(
+    live: Live, tmp_path, monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    saved = _create(live, template(live, live.unique("Trial")))["id"]
+    live.ok("applications", "save", str(saved))
+    published = _published(live)
+
+    out = live.ok("applications", "blank-form", str(saved))
+    written = tmp_path / f"application-{saved}-blank.pdf"
+    assert written.name in out
+    assert written.read_bytes().startswith(b"%PDF")
+
+    out_file = tmp_path / "published.pdf"
+    out = live.ok("applications", "blank-form", str(published), "-o", str(out_file))
+    assert str(out_file) in out
+    assert out_file.read_bytes().startswith(b"%PDF")
+
+
+@pytest.mark.modules_on
+def test_issue_58_the_blank_form_of_a_draft_is_refused_with_the_hint(live: Live, tmp_path):
+    draft = str(_create(live, template(live, live.unique("Trial")))["id"])
+
+    res = live.refused("applications", "blank-form", draft, "-o", str(tmp_path / "x.pdf"))
+
+    assert res.stderr.strip().splitlines()[-1].startswith("APPLICATION_NOT_SAVED:"), res.output
+    assert not (tmp_path / "x.pdf").exists()
+    res = live.refused("applications", "blank-form", "999999", "-o", str(tmp_path / "x.pdf"))
+    assert "APPLICATION_NOT_FOUND" in res.output
+
+
+@pytest.mark.modules_on
+def test_issue_58_a_member_cannot_download_the_blank_form(live: Live, tmp_path):
+    member = live.active_member()
+    app_id = _published(live)
+
+    res = live.refused(
+        "applications", "blank-form", str(app_id), "-o", str(tmp_path / "b.pdf"),
+        user=member, pw=MEMBER_PASSWORD,
+    )
+
+    assert "INSUFFICIENT_PERMISSION" in res.output
+    assert not list(tmp_path.iterdir())
 
 
 @pytest.mark.modules_on
