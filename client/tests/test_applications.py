@@ -482,7 +482,8 @@ def test_issue_56_clause_help_describes_the_list_and_fill_clause_is_gone():
     clauses = " ".join(CliRunner().invoke(main, ["applications", "clauses", "--help"]).output.split())
     gone = CliRunner().invoke(main, ["applications", "fill-clause", "--help"])
 
-    for word in ("source", "builtin", "club", "key", "id", "gaps", "applications library"):
+    # club_server#133 (cli #60): one list of library texts, no source or gaps.
+    for word in ("key", "id", "applications library"):
         assert word in clauses, word
     assert gone.exit_code != 0
 
@@ -686,3 +687,107 @@ def test_issue_38_capabilities_help_names_applications():
     assert res.exit_code == 0
     assert "applications" in text
     assert "APPLICATIONS_DISABLED" in text
+
+
+# ── Library texts with keys, editable labels, the club's languages (club_server#133, cli #60) ──
+
+LABELS = f"{A}/labels"
+
+
+def test_issue_60_labels_set_patches_one_label_in_each_language(monkeypatch):
+    fake = FakeHttp().install(monkeypatch)
+    fake.on("PATCH", f"{LABELS}/field.full_name", {"key": "field.full_name", "text": {"en": "Name", "mr": "नाव"}})
+
+    res = run("applications", "labels", "set", "field.full_name", "--text", "en", "Name", "--text", "mr", "नाव")
+
+    assert res.exit_code == 0, res.output
+    assert fake.calls_to("PATCH", f"{LABELS}/field.full_name")[0].json == {"text": {"en": "Name", "mr": "नाव"}}
+    assert json.loads(res.stdout)["key"] == "field.full_name"
+
+
+@pytest.mark.parametrize("args", [
+    ("field.full_name",),                                                   # no text
+    ("--text", "en", "Name"),                                               # no key
+    ("field.full_name", "--text", "en", "Name", "--text", "en", "Again"),  # a language twice
+])
+def test_issue_60_labels_set_refuses_a_bad_command_line(monkeypatch, args):
+    fake = FakeHttp().install(monkeypatch)
+
+    res = run("applications", "labels", "set", *args)
+
+    assert res.exit_code != 0
+    assert fake.calls == []
+
+
+def test_issue_60_labels_alone_still_reads_the_labels(monkeypatch):
+    fake = FakeHttp().install(monkeypatch)
+    fake.on("GET", LABELS, {"languages": ["en", "mr"], "labels": {}})
+
+    res = run("applications", "labels")
+
+    assert res.exit_code == 0, res.output
+    assert json.loads(res.stdout)["languages"] == ["en", "mr"]
+    assert fake.calls_to("PATCH", LABELS) == []
+
+
+def test_issue_60_labels_help_names_set_and_its_refusals():
+    group = " ".join(CliRunner().invoke(main, ["applications", "labels", "--help"]).output.split())
+    set_help = " ".join(CliRunner().invoke(main, ["applications", "labels", "set", "--help"]).output.split())
+
+    assert "set" in group and "club's languages" in group
+    for word in ("--text", "English", "APPLICATION_LABEL_NOT_FOUND", "APPLICATION_LANGUAGE_NOT_OFFERED"):
+        assert word in set_help, word
+
+
+def test_issue_60_an_unknown_label_gets_a_hint(monkeypatch):
+    fake = FakeHttp().install(monkeypatch)
+    fake.on("PATCH", f"{LABELS}/field.nope", _refusal("APPLICATION_LABEL_NOT_FOUND"), status=404)
+
+    res = run("applications", "labels", "set", "field.nope", "--text", "en", "x")
+
+    assert res.exit_code != 0
+    hint = res.stderr.strip().splitlines()[-1]
+    assert hint.startswith("APPLICATION_LABEL_NOT_FOUND: ")
+    assert "applications labels" in hint
+
+
+def test_issue_60_a_language_the_club_lacks_gets_a_hint_naming_it(monkeypatch):
+    fake = FakeHttp().install(monkeypatch)
+    fake.on("POST", A, _refusal("APPLICATION_LANGUAGE_NOT_OFFERED", languages=["hi"]), status=422)
+
+    res = run("applications", "create", "--json", '{"languages": ["en", "hi"]}')
+
+    assert res.exit_code != 0
+    hint = res.stderr.strip().splitlines()[-1]
+    assert hint.startswith("APPLICATION_LANGUAGE_NOT_OFFERED: ")
+    assert "profile-options" in hint
+    assert "Languages: hi." in hint
+
+
+def test_issue_60_incomplete_hint_points_a_label_at_labels_set(monkeypatch):
+    fake = FakeHttp().install(monkeypatch)
+    fake.on(
+        "POST", f"{A}/7/save",
+        _refusal("APPLICATION_INCOMPLETE", missing=[{"field": "labels.field.full_name", "languages": ["mr"]}]),
+        status=422,
+    )
+
+    res = run("applications", "save", "7")
+
+    hint = res.stderr.strip().splitlines()[-1]
+    assert "labels.field.full_name (mr)" in hint
+    assert "applications labels set" in hint
+
+
+def test_issue_60_clauses_and_library_help_describe_one_list_of_library_texts():
+    clauses = " ".join(CliRunner().invoke(main, ["applications", "clauses", "--help"]).output.split())
+    library = " ".join(CliRunner().invoke(main, ["applications", "library", "--help"]).output.split())
+    create = " ".join(CliRunner().invoke(main, ["applications", "library", "create", "--help"]).output.split())
+
+    for word in ("key", "applications library", "club's languages"):
+        assert word in clauses, word
+    for gone in ("source", "builtin", "gaps"):
+        assert gone not in clauses, gone
+    assert "built-in" in library and "edited and deleted" in library
+    assert "key" in create and "club's languages" in create
+    assert "(en, mr, hi)" not in create

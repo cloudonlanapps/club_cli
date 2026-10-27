@@ -411,3 +411,60 @@ def test_issue_38_private_profile_help_names_the_extended_fields(command):
     assert res.exit_code == 0
     for field in ("clubDistrict", "preferredPosition", "guardian", "membershipDateUtc"):
         assert field in text
+
+
+# ── the club's languages as {code, name} (club_server#133, cli #60) ─────
+
+CODED = {
+    "positions": [{"value": "Forward", "label": {"en": "Forward", "mr": "फॉरवर्ड"}}],
+    "languages": [{"code": "en", "name": "English"}, {"code": "mr", "name": "Marathi"}],
+}
+
+
+def test_issue_60_set_languages_keeps_the_positions_and_sends_codes_and_names(monkeypatch):
+    fake = FakeHttp().install(monkeypatch)
+    fake.on("GET", OPTIONS, CODED)
+    fake.on("PATCH", OPTIONS_WRITE, {"key": "profile_options", "value": CODED})
+
+    res = run("profile-options", "set-languages", "en=English", "mr=Marathi", "Konkani")
+
+    assert res.exit_code == 0, res.output
+    assert fake.calls_to("PATCH", OPTIONS_WRITE)[0].json == {"value": {
+        "positions": CODED["positions"],
+        "languages": [{"code": "en", "name": "English"}, {"code": "mr", "name": "Marathi"}, "Konkani"],
+    }}
+
+
+@pytest.mark.parametrize("args", [
+    (),                    # no language
+    ("=English",),         # a code with nothing before =
+    ("en=",),              # a name with nothing after =
+])
+def test_issue_60_set_languages_refuses_a_bad_command_line(monkeypatch, args):
+    fake = FakeHttp().install(monkeypatch)
+
+    res = run("profile-options", "set-languages", *args)
+
+    assert res.exit_code != 0
+    assert fake.calls == []
+
+
+def test_issue_60_set_languages_stops_when_the_options_cannot_be_read(monkeypatch):
+    fake = FakeHttp().install(monkeypatch)
+    fake.on("GET", OPTIONS, {"detail": "Not authenticated"}, status=401)
+
+    res = run("profile-options", "set-languages", "en=English")
+
+    assert res.exit_code != 0
+    assert fake.calls_to("PATCH", OPTIONS_WRITE) == []
+
+
+def test_issue_60_profile_options_help_describes_coded_languages():
+    get = " ".join(CliRunner().invoke(main, ["profile-options", "get", "--help"]).output.split())
+    set_ = " ".join(CliRunner().invoke(main, ["profile-options", "set", "--help"]).output.split())
+    langs = " ".join(CliRunner().invoke(main, ["profile-options", "set-languages", "--help"]).output.split())
+
+    assert '{code, name}' in get and "English and Marathi" in get
+    assert '{"code": "en", "name": "English"}' in set_ and "takes its code" in set_
+    for word in ("CODE=NAME", "English", "application", "positions"):
+        assert word in langs, word

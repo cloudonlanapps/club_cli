@@ -30,7 +30,7 @@ MATCHES = {"type": "date_range", "from": day(2026, 11, 19), "to": day(2026, 11, 
 
 
 def clause(live: Live, key: str, **renamed: str) -> dict:
-    """One built-in clause from `applications clauses`, its gaps renamed ({old: new}) to the template's facts."""
+    """One seeded built-in clause, by its key, from `applications clauses`, its gaps renamed ({old: new}) to the template's facts."""
     (found,) = [c for c in live.ok("applications", "clauses")["clauses"] if c["key"] == key]
 
     def rename(text: dict | None) -> dict | None:
@@ -112,6 +112,7 @@ def test_issue_38_capabilities_report_applications(live: Live):
     ("library", "list"), ("library", "get", "1"), ("library", "delete", "1"),
     ("library", "create", "--kind", "note", "--name", "n", "--text", "en", "x"),
     ("library", "update", "1", "--name", "n"),
+    ("labels", "set", "field.full_name", "--text", "en", "Name"),
     ("blank-form", "1", "-o", "blank.pdf"),
 ])
 def test_issue_38_every_command_answers_503_while_off(live: Live, args):
@@ -216,10 +217,10 @@ def test_issue_56_a_club_text_goes_through_its_whole_lifecycle(live: Live):
     assert live.ok("applications", "library", "get", text_id) == created
     assert created["id"] in {t["id"] for t in live.ok("applications", "library", "list")}
     (listed,) = [c for c in live.ok("applications", "clauses")["clauses"] if c["id"] == created["id"]]
-    assert listed["source"] == "club" and listed["key"] is None and listed["name"] == name
+    assert listed == created and listed["key"] is None
 
-    renamed = live.ok("applications", "library", "update", text_id, "--name", name + "_2", "--text", "hi", "₹{amount} दें।")
-    assert renamed["name"] == name + "_2" and renamed["text"] == {"hi": "₹{amount} दें।"}
+    renamed = live.ok("applications", "library", "update", text_id, "--name", name + "_2", "--text", "en", "Pay {amount}.")
+    assert renamed["name"] == name + "_2" and renamed["text"] == {"en": "Pay {amount}."}
     assert renamed["heading"] == {"en": "Fee"}
 
     res = live.refused("applications", "library", "update", text_id, "--kind", "note")
@@ -244,7 +245,9 @@ def test_issue_56_the_library_refuses_a_heading_off_a_rule_and_an_unknown_langua
     )
 
     assert "only a rule has a heading" in heading.output
-    assert '"fr"' in language.output
+    # fr is a language code, but not one of the club's (club_server#133, cli #60).
+    assert "APPLICATION_LANGUAGE_NOT_OFFERED" in language.output and '"fr"' in language.output
+    assert "profile-options" in language.stderr
 
 
 @pytest.mark.modules_on
@@ -272,11 +275,14 @@ def test_issue_38_admin_reads_the_labels_and_the_clauses(live: Live):
     clauses = live.ok("applications", "clauses")
 
     assert "en" in labels["languages"] and labels["labels"]
-    builtin = [c for c in clauses["clauses"] if c["source"] == "builtin"]
+    assert clauses["languages"] == labels["languages"]
+    # The built-in clauses are seeded library texts, each with its key (club_server#133, cli #60).
+    builtin = [c for c in clauses["clauses"] if c["key"] is not None]
     assert "declaration.trial" in {c["key"] for c in builtin}
-    assert all(c["id"] is None for c in builtin)
+    assert all(isinstance(c["id"], int) and c["name"] for c in builtin)
     (fee,) = [c for c in builtin if c["key"] == "rule.fee"]
-    assert fee["gaps"] == {"amount": "amount"} and "{amount}" in fee["text"]["en"]
+    assert "{amount}" in fee["text"]["en"] and "source" not in fee and "gaps" not in fee
+    assert fee == live.ok("applications", "library", "get", str(fee["id"]))
 
 
 @pytest.mark.modules_on
@@ -434,3 +440,45 @@ def test_issue_46_a_member_fitting_two_categories_chooses_one(live: Live, tmp_pa
     theirs = tmp_path / "theirs.pdf"
     live.ok("applications", "form", app_id, "--user", member, "--category", "0", "-o", str(theirs))
     assert theirs.read_bytes().startswith(b"%PDF")
+
+
+# ── Editable labels and the club's languages (club_server#133, cli #60) ──
+
+
+@pytest.mark.modules_on
+def test_issue_60_an_admin_edits_a_label_and_the_edit_is_read_back(live: Live):
+    before = live.ok("applications", "labels")["labels"]["field.full_name"]
+    try:
+        edited = live.ok(
+            "applications", "labels", "set", "field.full_name", "--text", "en", "Full name of the player",
+            "--text", "mr", "खेळाडूचे पूर्ण नाव",
+        )
+        assert edited == {"key": "field.full_name", "text": {"en": "Full name of the player", "mr": "खेळाडूचे पूर्ण नाव"}}
+        assert live.ok("applications", "labels")["labels"]["field.full_name"] == edited["text"]
+    finally:
+        args = [a for lang, text in before.items() for a in ("--text", lang, text)]
+        live.ok("applications", "labels", "set", "field.full_name", *args)
+
+
+@pytest.mark.modules_on
+def test_issue_60_label_edits_are_refused_with_a_hint(live: Live):
+    unknown = live.refused("applications", "labels", "set", "field.nope", "--text", "en", "x")
+    language = live.refused("applications", "labels", "set", "field.full_name", "--text", "en", "x", "--text", "gu", "y")
+    member = live.active_member()
+    by_member = live.refused(
+        "applications", "labels", "set", "field.full_name", "--text", "en", "x", user=member, pw=MEMBER_PASSWORD,
+    )
+
+    assert "APPLICATION_LABEL_NOT_FOUND" in unknown.output and "applications labels" in unknown.stderr
+    assert "APPLICATION_LANGUAGE_NOT_OFFERED" in language.output and "Languages: gu." in language.stderr
+    assert "INSUFFICIENT_PERMISSION" in by_member.output
+
+
+@pytest.mark.modules_on
+def test_issue_60_a_template_printing_in_a_language_the_club_lacks_is_refused(live: Live):
+    body = {"languages": ["en", "gu"], "title": {"en": live.unique("Trial")}}
+
+    res = live.refused("applications", "create", "--json", json.dumps(body))
+
+    assert "APPLICATION_LANGUAGE_NOT_OFFERED" in res.output
+    assert "Languages: gu." in res.stderr
