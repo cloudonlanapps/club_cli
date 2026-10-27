@@ -284,6 +284,14 @@ def test_issue_58_a_refused_blank_form_writes_nothing_and_says_save_first(monkey
     assert list(tmp_path.iterdir()) == []
 
 
+def test_issue_58_group_help_names_the_blank_form():
+    res = CliRunner().invoke(main, ["applications", "--help"])
+
+    assert res.exit_code == 0
+    assert "`blank-form`" in res.output
+    assert "drawn per request" not in res.output
+
+
 def test_issue_58_blank_form_help_says_admin_and_no_member():
     res = CliRunner().invoke(main, ["applications", "blank-form", "--help"])
 

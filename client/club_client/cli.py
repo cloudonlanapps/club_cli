@@ -3643,9 +3643,11 @@ def applications():
     it back to saved, `revert` takes a saved one back to draft (editable
     again). A move from another state → 422 INVALID_TRANSITION. Admins see
     and write every template; a member who has uploaded an identity document
-    sees the published ones and downloads their own form (`form`). Every
-    PDF is drawn per request. While `capabilities` reports applications
-    false, every command answers 503 APPLICATIONS_DISABLED.
+    sees the published ones and downloads their own form (`form`); an
+    admin downloads a saved or published one's blank form (`blank-form`).
+    A published template is drawn once and each form is filled over that
+    drawing; `preview` draws on request. While `capabilities` reports
+    applications false, every command answers 503 APPLICATIONS_DISABLED.
     """
     pass
 
