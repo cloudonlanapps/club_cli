@@ -2,8 +2,9 @@
 
 cli_test.conf turns applications on (with identity verification, which they
 need); cli_test_modules_off.conf turns both off, and every route answers 503.
-A template's texts are language maps, built here from `fill-clause` output
-(club_server#107, cli #45).
+A template's texts are language maps, built here from the clause list's texts
+as written, `{fact}` gaps included, which the server fills at print
+(club_server#126, cli #56).
 """
 from __future__ import annotations
 
@@ -28,17 +29,26 @@ CAMP = {"type": "date_range", "from": day(2026, 11, 16), "to": day(2026, 11, 17)
 MATCHES = {"type": "date_range", "from": day(2026, 11, 19), "to": day(2026, 11, 21)}
 
 
-def fill(live: Live, clause: str, facts: dict | None = None) -> dict:
-    """One library clause filled by the server: {clause, heading, text}."""
-    args = ["applications", "fill-clause", clause]
-    if facts:
-        args += ["--facts", json.dumps(facts)]
-    return live.ok(*args)
+def clause(live: Live, key: str, **renamed: str) -> dict:
+    """One built-in clause from `applications clauses`, its gaps renamed ({old: new}) to the template's facts."""
+    (found,) = [c for c in live.ok("applications", "clauses")["clauses"] if c["key"] == key]
+
+    def rename(text: dict | None) -> dict | None:
+        if text is None:
+            return None
+        out = {}
+        for lang, value in text.items():
+            for old, new in renamed.items():
+                value = value.replace("{" + old + "}", "{" + new + "}")
+            out[lang] = value
+        return out
+
+    return {**found, "text": rename(found["text"]), "heading": rename(found["heading"])}
 
 
 def template(live: Live, title: str) -> dict:
-    """A complete English + Marathi template, its texts filled from library clauses."""
-    rule = fill(live, "rule.identity_proof")
+    """A complete English + Marathi template, its texts taken from built-in clauses, gaps and all."""
+    rule = clause(live, "rule.identity_proof")
     return {
         "languages": ["en", "mr"],
         "facts": {"camp": CAMP, "matches": MATCHES},
@@ -48,18 +58,18 @@ def template(live: Live, title: str) -> dict:
         "header": [
             {"en": "City Rink", "mr": "सिटी रिंक"},
             [
-                fill(live, "header.training_camp", {"dates": CAMP})["text"],
-                fill(live, "header.matches", {"dates": MATCHES})["text"],
+                clause(live, "header.training_camp", dates="camp")["text"],
+                clause(live, "header.matches", dates="matches")["text"],
             ],
         ],
-        "selections": [fill(live, "selection.attend_training_camp", {"dates": CAMP})["text"]],
-        "declaration": fill(live, "declaration.trial")["text"],
+        "selections": [clause(live, "selection.attend_training_camp", dates="camp")["text"]],
+        "declaration": clause(live, "declaration.trial")["text"],
         "formFooter": {"en": "Play fair, play hard.", "mr": "खिलाडूवृत्तीने खेळा."},
         "terms": [
             {"heading": rule["heading"], "body": rule["text"]},
             {"heading": {"en": "Kit", "mr": "साहित्य"}, "body": {"en": "Bring a helmet.", "mr": "हेल्मेट आणा."}},
         ],
-        "termsNotes": [{"text": fill(live, "note.follow_rules")["text"]}],
+        "termsNotes": [{"text": clause(live, "note.follow_rules")["text"]}],
     }
 
 
@@ -99,7 +109,9 @@ def test_issue_38_capabilities_report_applications(live: Live):
 @pytest.mark.modules_off
 @pytest.mark.parametrize("args", [
     ("list",), ("show", "1"), ("create", "--json", "{}"), ("save", "1"), ("labels",), ("clauses",),
-    ("fill-clause", "declaration.trial"),
+    ("library", "list"), ("library", "get", "1"), ("library", "delete", "1"),
+    ("library", "create", "--kind", "note", "--name", "n", "--text", "en", "x"),
+    ("library", "update", "1", "--name", "n"),
 ])
 def test_issue_38_every_command_answers_503_while_off(live: Live, args):
     res = live.refused("applications", *args)
@@ -176,27 +188,71 @@ def test_issue_38_save_names_the_texts_missing_a_language(live: Live):
 
 
 @pytest.mark.modules_on
-def test_issue_45_fill_clause_gives_the_text_in_every_library_language(live: Live):
-    languages = live.ok("applications", "clauses")["languages"]
+def test_issue_56_save_names_each_gap_that_names_no_fact(live: Live):
+    body = template(live, live.unique("Trial"))
+    body["selections"] = [clause(live, "selection.attend_training_camp")["text"]]  # {dates}: no such fact
+    app_id = str(_create(live, body)["id"])
 
-    filled = fill(live, "rule.fee", {"amount": {"type": "amount", "value": 1500}})
+    res = live.refused("applications", "save", app_id)
 
-    assert filled["clause"] == "rule.fee"
-    assert set(filled["text"]) == set(languages) and {"en", "mr", "hi"} <= set(languages)
-    assert all(filled["text"].values())
-    assert set(filled["heading"]) == set(languages)
-    assert "1500" in filled["text"]["en"].replace(",", "")
-    assert fill(live, "declaration.trial")["heading"] is None
+    assert "APPLICATION_UNKNOWN_FACT" in res.output
+    assert "Gaps: selections[0] (en): {dates}; selections[0] (mr): {dates}" in res.stderr
+    assert live.ok("applications", "show", app_id)["status"] == "draft"
 
 
 @pytest.mark.modules_on
-def test_issue_45_fill_clause_refuses_an_unknown_clause_or_a_missing_fact(live: Live):
-    unknown = live.refused("applications", "fill-clause", "rule.no_such_clause")
-    missing = live.refused("applications", "fill-clause", "rule.fee")
+def test_issue_56_a_club_text_goes_through_its_whole_lifecycle(live: Live):
+    name = live.unique("Fee")
+    created = live.ok(
+        "applications", "library", "create", "--kind", "rule", "--name", name,
+        "--text", "en", "Pay ₹{amount}.", "--text", "mr", "₹{amount} भरा.", "--heading", "en", "Fee",
+    )
+    text_id = str(created["id"])
+    assert created["kind"] == "rule" and created["name"] == name
+    assert created["text"] == {"en": "Pay ₹{amount}.", "mr": "₹{amount} भरा."}
+    assert created["heading"] == {"en": "Fee"} and created["createdBy"] == live.admin
 
-    for res in (unknown, missing):
-        assert "APPLICATION_INVALID_REFERENCE" in res.output
-        assert "applications clauses" in res.stderr
+    assert live.ok("applications", "library", "get", text_id) == created
+    assert created["id"] in {t["id"] for t in live.ok("applications", "library", "list")}
+    (listed,) = [c for c in live.ok("applications", "clauses")["clauses"] if c["id"] == created["id"]]
+    assert listed["source"] == "club" and listed["key"] is None and listed["name"] == name
+
+    renamed = live.ok("applications", "library", "update", text_id, "--name", name + "_2", "--text", "hi", "₹{amount} दें।")
+    assert renamed["name"] == name + "_2" and renamed["text"] == {"hi": "₹{amount} दें।"}
+    assert renamed["heading"] == {"en": "Fee"}
+
+    res = live.refused("applications", "library", "update", text_id, "--kind", "note")
+    assert "only a rule has a heading" in res.output
+    note = live.ok("applications", "library", "update", text_id, "--kind", "note", "--clear-heading")
+    assert note["kind"] == "note" and note["heading"] is None
+
+    live.ok("applications", "library", "delete", text_id)
+    res = live.refused("applications", "library", "get", text_id)
+    assert "APPLICATION_LIBRARY_TEXT_NOT_FOUND" in res.output
+    assert "applications library list" in res.stderr
+
+
+@pytest.mark.modules_on
+def test_issue_56_the_library_refuses_a_heading_off_a_rule_and_an_unknown_language(live: Live):
+    heading = live.refused(
+        "applications", "library", "create", "--kind", "note", "--name", live.unique("n"),
+        "--text", "en", "x", "--heading", "en", "H",
+    )
+    language = live.refused(
+        "applications", "library", "create", "--kind", "note", "--name", live.unique("n"), "--text", "fr", "x",
+    )
+
+    assert "only a rule has a heading" in heading.output
+    assert '"fr"' in language.output
+
+
+@pytest.mark.modules_on
+def test_issue_56_only_an_admin_reads_or_writes_the_library(live: Live):
+    member = live.active_member()
+
+    for args in (("list",), ("create", "--kind", "note", "--name", "n", "--text", "en", "x")):
+        res = live.refused("applications", "library", *args, user=member, pw=MEMBER_PASSWORD)
+        assert "INSUFFICIENT_PERMISSION" in res.output, (args, res.output)
 
 
 @pytest.mark.modules_on
@@ -215,7 +271,11 @@ def test_issue_38_admin_reads_the_labels_and_the_clauses(live: Live):
     clauses = live.ok("applications", "clauses")
 
     assert "en" in labels["languages"] and labels["labels"]
-    assert "declaration.trial" in clauses["clauses"]
+    builtin = [c for c in clauses["clauses"] if c["source"] == "builtin"]
+    assert "declaration.trial" in {c["key"] for c in builtin}
+    assert all(c["id"] is None for c in builtin)
+    (fee,) = [c for c in builtin if c["key"] == "rule.fee"]
+    assert fee["gaps"] == {"amount": "amount"} and "{amount}" in fee["text"]["en"]
 
 
 @pytest.mark.modules_on
