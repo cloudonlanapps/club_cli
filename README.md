@@ -130,7 +130,7 @@ The fields are stored, and shown by `user get` / `user private`, either way.
 
 `applications` wraps the printable application forms (club_server#93). An
 admin writes a template as JSON (`applications create --help` shows its
-shape), moves it draft → saved → published, and previews it at any state; a
+shape), moves it draft → saved → published, and previews it at any state, or downloads a saved or published one's blank form; a
 member who has uploaded an identity document lists the published ones and
 downloads their own form. Every printed text is a language map, `{lang: text}`,
 and may hold `{name}` gaps that the server fills at print from the template's
@@ -152,6 +152,7 @@ club_client -u sudo --pw <pw> applications update 3 --json '{"subtitle": null}'
 club_client -u sudo --pw <pw> applications preview 3 -o preview.pdf
 club_client -u sudo --pw <pw> applications save 3          # or unpublish / revert / duplicate / delete
 club_client -u sudo --pw <pw> applications publish 3
+club_client -u sudo --pw <pw> applications blank-form 3    # writes application-3-blank.pdf
 club_client -u sudo --pw <pw> applications list --status published --limit 50
 club_client -u sudo --pw <pw> applications form 3 --user alice
 club_client -u alice --pw <pw> applications form 3         # writes application-3-alice.pdf
@@ -159,7 +160,10 @@ club_client -u alice --pw <pw> applications form 3 --category 1   # fits several
 ```
 
 The PDF commands write `-o FILE`, or by default `application-<id>-<username>.pdf`
-in the current directory, and print the path. A member who fits more than one age
+in the current directory, and print the path. `applications blank-form` (admin)
+writes a saved or published template's form with no member in it and no
+watermark, to print and fill in by hand, by default as `application-<id>-blank.pdf`;
+a draft is refused with `APPLICATION_NOT_SAVED` (club_server#129). A member who fits more than one age
 category picks one with `--category <index>` (`applications show` lists the
 ones they fit as `fittingCategories`); otherwise the form is refused with
 `APPLICATION_CATEGORY_REQUIRED` (club_server#108). `save` is refused with
