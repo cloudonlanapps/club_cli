@@ -316,6 +316,10 @@ ERROR_HINTS = {
         "a member's form is drawn only from a published application: `applications save <id>` "
         "then `applications publish <id>`, or draw `applications preview <id>`."
     ),
+    "APPLICATION_NOT_SAVED": (
+        "a blank form is drawn only from a saved or published application: save the application "
+        "first with `applications save <id>`, or draw `applications preview <id>`."
+    ),
     "APPLICATION_NOT_ELIGIBLE": (
         "none of the application's age categories matches the member's date of birth and gender "
         "(`applications show <id>` lists them)."
@@ -3639,9 +3643,11 @@ def applications():
     it back to saved, `revert` takes a saved one back to draft (editable
     again). A move from another state → 422 INVALID_TRANSITION. Admins see
     and write every template; a member who has uploaded an identity document
-    sees the published ones and downloads their own form (`form`). Every
-    PDF is drawn per request. While `capabilities` reports applications
-    false, every command answers 503 APPLICATIONS_DISABLED.
+    sees the published ones and downloads their own form (`form`); an
+    admin downloads a saved or published one's blank form (`blank-form`).
+    A published template is drawn once and each form is filled over that
+    drawing; `preview` draws on request. While `capabilities` reports
+    applications false, every command answers 503 APPLICATIONS_DISABLED.
     """
     pass
 
@@ -4026,6 +4032,26 @@ def applications_preview(ctx: Context, application_id: int, output: str | None):
     """
     response = httpx.get(f"{ctx.base_url}/v1/applications/{application_id}/preview", headers=ctx.headers)
     _write_pdf(response, output, f"application-{application_id}-preview.pdf")
+
+
+@applications.command("blank-form")
+@click.argument("application_id", type=int)
+@click.option("--output", "-o", help="Output file (default: application-<id>-blank.pdf)")
+@pass_context
+def applications_blank_form(ctx: Context, application_id: int, output: str | None):
+    """Download a saved or published template's blank form as a PDF (admin).
+
+    No member's details and no watermark: a form to print and fill in by
+    hand. A published template gives its stored drawing, marked "Form
+    <publishId>"; a saved one is drawn now from its stored layout. A draft →
+    422 APPLICATION_NOT_SAVED (save it first); an unknown id → 404
+    APPLICATION_NOT_FOUND. Prints the path written.
+
+    Example: applications blank-form 3
+    Example: applications blank-form 3 -o blank.pdf
+    """
+    response = httpx.get(f"{ctx.base_url}/v1/applications/{application_id}/blank-form", headers=ctx.headers)
+    _write_pdf(response, output, f"application-{application_id}-blank.pdf")
 
 
 @applications.command("form")

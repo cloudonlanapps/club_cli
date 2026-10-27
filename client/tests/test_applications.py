@@ -231,6 +231,76 @@ def test_issue_38_a_refused_form_writes_nothing(monkeypatch, tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
+# ── The blank form (club_server#129, cli #58) ──────────────────────────
+
+
+def test_issue_58_blank_form_writes_the_pdf_to_output(monkeypatch, tmp_path):
+    fake = FakeHttp().install(monkeypatch)
+    fake.on("GET", f"{A}/7/blank-form", responder=lambda _c: _pdf(b"%PDF blank", "application-7-blank.pdf"))
+    out = tmp_path / "b.pdf"
+
+    res = run("applications", "blank-form", "7", "-o", str(out))
+
+    assert res.exit_code == 0, res.output
+    assert out.read_bytes() == b"%PDF blank"
+    assert str(out) in res.output
+    assert fake.calls_to("GET", f"{A}/7/preview") == []
+
+
+def test_issue_58_blank_form_defaults_to_application_id_blank(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    fake = FakeHttp().install(monkeypatch)
+    fake.on("GET", f"{A}/7/blank-form", responder=lambda _c: _pdf(b"%PDF blank"))
+
+    res = run("applications", "blank-form", "7")
+
+    assert res.exit_code == 0, res.output
+    assert (tmp_path / "application-7-blank.pdf").read_bytes() == b"%PDF blank"
+    assert "application-7-blank.pdf" in res.output
+
+
+def test_issue_58_blank_form_takes_the_servers_file_name(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    fake = FakeHttp().install(monkeypatch)
+    fake.on("GET", f"{A}/7/blank-form", responder=lambda _c: _pdf(b"%PDF", "application-7-blank.pdf"))
+
+    res = run("applications", "blank-form", "7")
+
+    assert res.exit_code == 0, res.output
+    assert (tmp_path / "application-7-blank.pdf").read_bytes() == b"%PDF"
+
+
+def test_issue_58_a_refused_blank_form_writes_nothing_and_says_save_first(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    fake = FakeHttp().install(monkeypatch)
+    fake.on("GET", f"{A}/7/blank-form", _refusal("APPLICATION_NOT_SAVED"), status=422)
+
+    res = run("applications", "blank-form", "7")
+
+    assert res.exit_code != 0
+    hint = res.stderr.strip().splitlines()[-1]
+    assert hint.startswith("APPLICATION_NOT_SAVED:")
+    assert "save" in hint and "applications save" in hint
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_issue_58_group_help_names_the_blank_form():
+    res = CliRunner().invoke(main, ["applications", "--help"])
+
+    assert res.exit_code == 0
+    assert "`blank-form`" in res.output
+    assert "drawn per request" not in res.output
+
+
+def test_issue_58_blank_form_help_says_admin_and_no_member():
+    res = CliRunner().invoke(main, ["applications", "blank-form", "--help"])
+
+    assert res.exit_code == 0
+    assert "admin" in res.output
+    assert "APPLICATION_NOT_SAVED" in res.output
+    assert "--output" in res.output
+
+
 # ── The age-category choice on download (club_server#108, cli #46) ──────
 
 
@@ -351,6 +421,7 @@ def test_issue_38_does_not_fit_hint_gives_the_overflow(monkeypatch):
     "APPLICATIONS_DISABLED",
     "APPLICATION_NOT_FOUND",
     "APPLICATION_NOT_PUBLISHED",
+    "APPLICATION_NOT_SAVED",
     "APPLICATION_NOT_ELIGIBLE",
     "APPLICATION_INVALID_REFERENCE",
     "APPLICATION_UNKNOWN_FACT",
@@ -594,7 +665,7 @@ def test_issue_38_group_help_lists_every_command():
     assert res.exit_code == 0
     for command in (
         "list", "show", "create", "update", "delete", "duplicate", "save", "publish",
-        "unpublish", "revert", "preview", "labels", "clauses", "library", "form",
+        "unpublish", "revert", "preview", "blank-form", "labels", "clauses", "library", "form",
     ):
         assert f"  {command} " in res.output, command
 
