@@ -3,6 +3,8 @@
 `applications` wraps every /v1/applications route: the templates (list, show,
 create, update, delete, duplicate), the four state moves, the label catalogue
 and clause library, and the PDFs (preview, own form, a member's form).
+A template's printed texts are language maps; `fill-clause` fills one library
+clause for an admin to paste in (club_server#107, cli #45).
 """
 from __future__ import annotations
 
@@ -278,6 +280,102 @@ def test_issue_38_application_refusals_get_a_hint(monkeypatch, code):
     assert res.stderr.strip().splitlines()[-1].startswith(f"{code}:")
 
 
+# ── Filling one clause (club_server#107, cli #45) ───────────────────────
+
+FILL = f"{A}/clauses/fill"
+FEE_FACTS = {"amount": {"type": "amount", "value": 1500}}
+FILLED = {
+    "clause": "rule.fee",
+    "heading": {"en": "Fee", "mr": "शुल्क", "hi": "शुल्क"},
+    "text": {"en": "The fee is ₹1500.", "mr": "शुल्क ₹1500 आहे.", "hi": "शुल्क ₹1500 है।"},
+}
+
+
+def test_issue_45_fill_clause_posts_the_clause_and_its_facts(monkeypatch):
+    fake = FakeHttp().install(monkeypatch)
+    fake.on("POST", FILL, FILLED)
+
+    res = run("applications", "fill-clause", "rule.fee", "--facts", json.dumps(FEE_FACTS))
+
+    assert res.exit_code == 0, res.output
+    (call,) = fake.calls_to("POST", FILL)
+    assert call.json == {"clause": "rule.fee", "facts": FEE_FACTS}
+    assert json.loads(res.output) == FILLED
+
+
+def test_issue_45_fill_clause_reads_the_facts_from_a_file(monkeypatch, tmp_path):
+    fake = FakeHttp().install(monkeypatch)
+    fake.on("POST", FILL, FILLED)
+    path = tmp_path / "facts.json"
+    path.write_text(json.dumps(FEE_FACTS), encoding="utf-8")
+
+    res = run("applications", "fill-clause", "rule.fee", "--file", str(path))
+
+    assert res.exit_code == 0, res.output
+    assert fake.calls_to("POST", FILL)[0].json == {"clause": "rule.fee", "facts": FEE_FACTS}
+
+
+def test_issue_45_a_clause_without_gaps_sends_no_facts(monkeypatch):
+    fake = FakeHttp().install(monkeypatch)
+    fake.on("POST", FILL, {"clause": "declaration.trial", "heading": None, "text": {"en": "I agree."}})
+
+    res = run("applications", "fill-clause", "declaration.trial")
+
+    assert res.exit_code == 0, res.output
+    assert fake.calls_to("POST", FILL)[0].json == {"clause": "declaration.trial", "facts": {}}
+
+
+@pytest.mark.parametrize("facts", ["[1, 2]", '"amount"', "not json"])
+def test_issue_45_facts_must_be_a_json_object(monkeypatch, facts):
+    fake = FakeHttp().install(monkeypatch)
+
+    res = run("applications", "fill-clause", "rule.fee", "--facts", facts)
+
+    assert res.exit_code != 0
+    assert fake.calls == []
+
+
+def test_issue_45_facts_inline_and_from_a_file_are_refused(monkeypatch, tmp_path):
+    fake = FakeHttp().install(monkeypatch)
+    path = tmp_path / "facts.json"
+    path.write_text("{}")
+
+    res = run("applications", "fill-clause", "rule.fee", "--facts", "{}", "--file", str(path))
+
+    assert res.exit_code != 0
+    assert fake.calls == []
+
+
+def test_issue_45_an_invalid_reference_points_at_the_clause_library(monkeypatch):
+    fake = FakeHttp().install(monkeypatch)
+    fake.on("POST", FILL, _refusal("APPLICATION_INVALID_REFERENCE"), status=422)
+
+    res = run("applications", "fill-clause", "rule.no_such_clause")
+
+    assert res.exit_code != 0
+    assert "APPLICATION_INVALID_REFERENCE: " in res.output
+    assert "applications clauses" in res.output
+
+
+def test_issue_45_fill_clause_help_shows_the_facts_and_the_answer():
+    res = CliRunner().invoke(main, ["applications", "fill-clause", "--help"])
+
+    text = " ".join(res.output.split())
+    assert res.exit_code == 0
+    for word in ("--facts", "--file", "heading", "text", "date_range", "applications clauses"):
+        assert word in text, word
+
+
+def test_issue_45_template_help_takes_language_maps_only():
+    res = CliRunner().invoke(main, ["applications", "create", "--help"])
+
+    text = " ".join(res.output.split())
+    assert res.exit_code == 0
+    assert '{"clause": id' not in text and '{"fact": name}' not in text
+    assert "→ 422" in text and "fill-clause" in text
+    assert '"heading": {lang: text}, "body": {lang: text}' in text
+
+
 # ── Help ────────────────────────────────────────────────────────────────
 
 
@@ -287,7 +385,7 @@ def test_issue_38_group_help_lists_every_command():
     assert res.exit_code == 0
     for command in (
         "list", "show", "create", "update", "delete", "duplicate", "save", "publish",
-        "unpublish", "revert", "preview", "labels", "clauses", "form",
+        "unpublish", "revert", "preview", "labels", "clauses", "fill-clause", "form",
     ):
         assert f"  {command} " in res.output, command
 

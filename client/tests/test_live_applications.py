@@ -2,6 +2,8 @@
 
 cli_test.conf turns applications on (with identity verification, which they
 need); cli_test_modules_off.conf turns both off, and every route answers 503.
+A template's texts are language maps, built here from `fill-clause` output
+(club_server#107, cli #45).
 """
 from __future__ import annotations
 
@@ -22,33 +24,42 @@ def day(y: int, m: int, d: int) -> int:
     return int(datetime(y, m, d, tzinfo=timezone.utc).timestamp() * 1000)
 
 
-def template(title: str) -> dict:
-    """A complete English + Marathi template, built from library clauses and facts."""
+CAMP = {"type": "date_range", "from": day(2026, 11, 16), "to": day(2026, 11, 17)}
+MATCHES = {"type": "date_range", "from": day(2026, 11, 19), "to": day(2026, 11, 21)}
+
+
+def fill(live: Live, clause: str, facts: dict | None = None) -> dict:
+    """One library clause filled by the server: {clause, heading, text}."""
+    args = ["applications", "fill-clause", clause]
+    if facts:
+        args += ["--facts", json.dumps(facts)]
+    return live.ok(*args)
+
+
+def template(live: Live, title: str) -> dict:
+    """A complete English + Marathi template, its texts filled from library clauses."""
+    rule = fill(live, "rule.identity_proof")
     return {
         "languages": ["en", "mr"],
-        "facts": {
-            "venue": {"type": "name", "value": {"en": "City Rink", "mr": "सिटी रिंक"}},
-            "camp": {"type": "date_range", "from": day(2026, 11, 16), "to": day(2026, 11, 17)},
-            "matches": {"type": "date_range", "from": day(2026, 11, 19), "to": day(2026, 11, 21)},
-        },
+        "facts": {"camp": CAMP, "matches": MATCHES},
         "organisation": {"en": "EXAMPLE CLUB", "mr": "उदाहरण क्लब"},
         "title": {"en": title, "mr": "नोंदणी अर्ज"},
-        "subtitle": {"fact": "camp"},
+        "subtitle": {"en": "16–17 November 2026", "mr": "१६–१७ नोव्हेंबर २०२६"},
         "header": [
-            {"fact": "venue"},
+            {"en": "City Rink", "mr": "सिटी रिंक"},
             [
-                {"clause": "header.training_camp", "args": {"dates": "camp"}},
-                {"clause": "header.matches", "args": {"dates": "matches"}},
+                fill(live, "header.training_camp", {"dates": CAMP})["text"],
+                fill(live, "header.matches", {"dates": MATCHES})["text"],
             ],
         ],
-        "selections": [{"clause": "selection.attend_training_camp", "args": {"dates": "camp"}}],
-        "declaration": {"clause": "declaration.trial"},
+        "selections": [fill(live, "selection.attend_training_camp", {"dates": CAMP})["text"]],
+        "declaration": fill(live, "declaration.trial")["text"],
         "formFooter": {"en": "Play fair, play hard.", "mr": "खिलाडूवृत्तीने खेळा."},
         "terms": [
-            {"clause": "rule.identity_proof"},
+            {"heading": rule["heading"], "body": rule["text"]},
             {"heading": {"en": "Kit", "mr": "साहित्य"}, "body": {"en": "Bring a helmet.", "mr": "हेल्मेट आणा."}},
         ],
-        "termsNotes": [{"clause": "note.follow_rules"}],
+        "termsNotes": [{"text": fill(live, "note.follow_rules")["text"]}],
     }
 
 
@@ -59,7 +70,7 @@ def _create(live: Live, body: dict) -> dict:
 
 
 def _published(live: Live, body: dict | None = None) -> int:
-    app_id = _create(live, body or template(live.unique("Trial")))["id"]
+    app_id = _create(live, body or template(live, live.unique("Trial")))["id"]
     live.ok("applications", "save", str(app_id))
     assert live.ok("applications", "publish", str(app_id))["status"] == "published"
     return app_id
@@ -88,6 +99,7 @@ def test_issue_38_capabilities_report_applications(live: Live):
 @pytest.mark.modules_off
 @pytest.mark.parametrize("args", [
     ("list",), ("show", "1"), ("create", "--json", "{}"), ("save", "1"), ("labels",), ("clauses",),
+    ("fill-clause", "declaration.trial"),
 ])
 def test_issue_38_every_command_answers_503_while_off(live: Live, args):
     res = live.refused("applications", *args)
@@ -98,15 +110,16 @@ def test_issue_38_every_command_answers_503_while_off(live: Live, args):
 @pytest.mark.modules_on
 def test_issue_38_a_template_goes_through_its_whole_lifecycle(live: Live, tmp_path):
     title = live.unique("Trial")
-    created = _create(live, template(title))
+    created = _create(live, template(live, title))
     app_id = str(created["id"])
     assert created["layout"] is None
 
     updated = live.ok("applications", "update", app_id, "--json", '{"subtitle": null}')
     assert "subtitle" not in updated or updated["subtitle"] is None
     path = tmp_path / "t.json"
-    path.write_text(json.dumps(template(title), ensure_ascii=False), encoding="utf-8")
-    assert live.ok("applications", "update", app_id, "--file", str(path))["subtitle"] == {"fact": "camp"}
+    body = template(live, title)
+    path.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
+    assert live.ok("applications", "update", app_id, "--file", str(path))["subtitle"] == body["subtitle"]
 
     preview = tmp_path / "preview.pdf"
     out = live.ok("applications", "preview", app_id, "-o", str(preview))
@@ -141,7 +154,7 @@ def test_issue_38_a_template_goes_through_its_whole_lifecycle(live: Live, tmp_pa
 
 @pytest.mark.modules_on
 def test_issue_38_a_move_from_the_wrong_state_is_refused(live: Live):
-    app_id = str(_create(live, template(live.unique("Trial")))["id"])
+    app_id = str(_create(live, template(live, live.unique("Trial")))["id"])
 
     res = live.refused("applications", "publish", app_id)
 
@@ -151,7 +164,7 @@ def test_issue_38_a_move_from_the_wrong_state_is_refused(live: Live):
 
 @pytest.mark.modules_on
 def test_issue_38_save_names_the_texts_missing_a_language(live: Live):
-    body = template(live.unique("Trial"))
+    body = template(live, live.unique("Trial"))
     body["formFooter"] = {"en": "Play fair."}
     app_id = str(_create(live, body)["id"])
 
@@ -163,15 +176,37 @@ def test_issue_38_save_names_the_texts_missing_a_language(live: Live):
 
 
 @pytest.mark.modules_on
-def test_issue_38_save_refuses_an_unknown_clause(live: Live):
-    body = template(live.unique("Trial"))
-    body["declaration"] = {"clause": "declaration.no_such_clause"}
-    app_id = str(_create(live, body)["id"])
+def test_issue_45_fill_clause_gives_the_text_in_every_library_language(live: Live):
+    languages = live.ok("applications", "clauses")["languages"]
 
-    res = live.refused("applications", "save", app_id)
+    filled = fill(live, "rule.fee", {"amount": {"type": "amount", "value": 1500}})
 
-    assert "APPLICATION_INVALID_REFERENCE" in res.output
-    assert "applications clauses" in res.stderr
+    assert filled["clause"] == "rule.fee"
+    assert set(filled["text"]) == set(languages) and {"en", "mr", "hi"} <= set(languages)
+    assert all(filled["text"].values())
+    assert set(filled["heading"]) == set(languages)
+    assert "1500" in filled["text"]["en"].replace(",", "")
+    assert fill(live, "declaration.trial")["heading"] is None
+
+
+@pytest.mark.modules_on
+def test_issue_45_fill_clause_refuses_an_unknown_clause_or_a_missing_fact(live: Live):
+    unknown = live.refused("applications", "fill-clause", "rule.no_such_clause")
+    missing = live.refused("applications", "fill-clause", "rule.fee")
+
+    for res in (unknown, missing):
+        assert "APPLICATION_INVALID_REFERENCE" in res.output
+        assert "applications clauses" in res.stderr
+
+
+@pytest.mark.modules_on
+def test_issue_45_a_clause_reference_in_a_template_is_refused(live: Live):
+    body = template(live, live.unique("Trial"))
+    body["declaration"] = {"clause": "declaration.trial"}
+
+    res = live.refused("applications", "create", "--json", json.dumps(body, ensure_ascii=False))
+
+    assert "declaration" in res.output
 
 
 @pytest.mark.modules_on
@@ -241,7 +276,7 @@ def test_issue_38_admin_downloads_a_members_form(live: Live, tmp_path):
 @pytest.mark.modules_on
 def test_issue_38_a_form_of_an_unpublished_template_is_refused(live: Live, tmp_path):
     member = _member_with_document(live)
-    app_id = str(_create(live, template(live.unique("Trial")))["id"])
+    app_id = str(_create(live, template(live, live.unique("Trial")))["id"])
 
     res = live.refused("applications", "form", app_id, "--user", member, "-o", str(tmp_path / "x.pdf"))
 
@@ -251,7 +286,7 @@ def test_issue_38_a_form_of_an_unpublished_template_is_refused(live: Live, tmp_p
 
 @pytest.mark.modules_on
 def test_issue_38_a_member_outside_every_age_category_is_refused(live: Live, tmp_path):
-    body = template(live.unique("Seniors"))
+    body = template(live, live.unique("Seniors"))
     # live.member_json is born 2012; this category is for those born in 2000 or earlier.
     body["ageCategories"] = [{"label": {"en": "Seniors", "mr": "वरिष्ठ"}, "bornOnOrBeforeUtc": day(2000, 1, 1)}]
     app_id = _published(live, body)

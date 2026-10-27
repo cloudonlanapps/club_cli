@@ -132,11 +132,15 @@ The fields are stored, and shown by `user get` / `user private`, either way.
 admin writes a template as JSON (`applications create --help` shows its
 shape), moves it draft → saved → published, and previews it at any state; a
 member who has uploaded an identity document lists the published ones and
-downloads their own form.
+downloads their own form. Every printed text is a language map, `{lang: text}`: to use a
+library clause, `fill-clause` fills its gaps and prints its text (and a
+rule's heading) in every library language, to paste into the template
+(club_server#107).
 
 ```bash
 club_client -u sudo --pw <pw> applications labels          # the label catalogue
 club_client -u sudo --pw <pw> applications clauses         # the clause library and its gaps
+club_client -u sudo --pw <pw> applications fill-clause rule.fee --facts '{"amount": {"type": "amount", "value": 1500}}'
 club_client -u sudo --pw <pw> applications create --file trial.json
 club_client -u sudo --pw <pw> applications update 3 --json '{"subtitle": null}'
 club_client -u sudo --pw <pw> applications preview 3 -o preview.pdf
