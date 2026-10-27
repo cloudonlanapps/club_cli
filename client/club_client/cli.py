@@ -543,22 +543,25 @@ def me_submit_for_review(ctx: Context):
 
 # ── The extended profile (club_server#92, cli #38) ──────────────────────
 
-# option → field, for the extended profile's free-text and choice fields.
+# option → field, for the extended profile's free-text fields.
 EXTENDED_TEXT_FIELDS = {
     "club_district": "clubDistrict",
-    "preferred_position": "preferredPosition",
     "past_experience": "pastExperience",
     "nationality": "nationality",
-    "preferred_language": "preferredLanguage",
+}
+# repeatable option → list field, for the club's choices (club_server#106).
+EXTENDED_CHOICE_FIELDS = {
+    "preferred_position": "preferredPositions",
+    "preferred_language": "preferredLanguages",
 }
 GUARDIAN_PARTS = {"guardian_name": "name", "guardian_relation": "relation", "guardian_phone": "phone"}
 # What `--clear` takes → the field it sends as null.
 EXTENDED_CLEARABLE = {
     "club-district": "clubDistrict",
-    "preferred-position": "preferredPosition",
+    "preferred-position": "preferredPositions",
     "past-experience": "pastExperience",
     "nationality": "nationality",
-    "preferred-language": "preferredLanguage",
+    "preferred-language": "preferredLanguages",
     "guardian": "guardian",
     "membership-date": "membershipDateUtc",
 }
@@ -566,9 +569,12 @@ EXTENDED_CLEARABLE = {
 EXTENDED_PROFILE_HELP = """Extended profile (club_server#92): each option sets one field; --clear
     FIELD (repeatable) sends it as null; a field not named is left as it
     is. The options join the JSON body, if one is given; a field named
-    twice is refused. --preferred-position and --preferred-language must
-    be one of the club's options (`profile-options get`), or the server
-    refuses with 422 INVALID_PROFILE_OPTION. The guardian is one field
+    twice is refused. --preferred-position and --preferred-language are
+    repeatable: their values are sent as the lists preferredPositions and
+    preferredLanguages (club_server#106), which replace the stored ones
+    (--clear empties a list). Each value must be one of the club's options
+    (`profile-options get`), or the server refuses with 422
+    INVALID_PROFILE_OPTION; a value given twice is refused with 422. The guardian is one field
     server-side: --guardian-name/-relation/-phone are merged into the
     stored guardian (or the JSON's), and an empty value clears that part.
     --membership-date (YYYY-MM-DD, stored as UTC midnight) is an admin's
@@ -577,10 +583,11 @@ EXTENDED_PROFILE_HELP = """Extended profile (club_server#92): each option sets o
     stored whatever `capabilities` says of extendedProfile."""
 
 PRIVATE_PROFILE_HELP = """The private record (self, staff or admin) carries the extended profile
-    (club_server#92), each null until set: clubDistrict, preferredPosition,
-    pastExperience, nationality, preferredLanguage, guardian {name,
-    relation, phone} and membershipDateUtc (UTC midnight, ms; set on
-    approval when blank)."""
+    (club_server#92), each null until set: clubDistrict, pastExperience,
+    nationality, guardian {name, relation, phone} and membershipDateUtc
+    (UTC midnight, ms; set on approval when blank), and the lists
+    preferredPositions and preferredLanguages ([] until set,
+    club_server#106)."""
 
 
 def extended_profile_help(command):
@@ -597,10 +604,16 @@ def extended_profile_options(command):
     """The extended profile's options, for `user update` and `me update`."""
     options = [
         click.option("--club-district", help="Club / district."),
-        click.option("--preferred-position", help="One of the club's positions (its value)."),
+        click.option(
+            "--preferred-position", multiple=True,
+            help="One of the club's positions (its value); repeatable, sent as preferredPositions.",
+        ),
         click.option("--past-experience", help="Past experience; may span lines."),
         click.option("--nationality", help="Nationality."),
-        click.option("--preferred-language", help="One of the club's languages."),
+        click.option(
+            "--preferred-language", multiple=True,
+            help="One of the club's languages; repeatable, sent as preferredLanguages.",
+        ),
         click.option("--guardian-name", help="Guardian's name; '' clears it."),
         click.option("--guardian-relation", help="Guardian's relation to the member; '' clears it."),
         click.option("--guardian-phone", help="Guardian's phone, checked like the member's; '' clears it."),
@@ -637,6 +650,9 @@ def apply_extended_profile(
     for option, field in EXTENDED_TEXT_FIELDS.items():
         if options.get(option) is not None:
             changes[field] = options[option]
+    for option, field in EXTENDED_CHOICE_FIELDS.items():
+        if options.get(option):
+            changes[field] = list(options[option])
     if options.get("membership_date") is not None:
         changes["membershipDateUtc"] = utc_midnight_ms(options["membership_date"])
     parts = {part: options[o] for o, part in GUARDIAN_PARTS.items() if options.get(o) is not None}
@@ -3493,6 +3509,10 @@ def _profile_options_url(ctx: Context) -> str:
     return f"{ctx.base_url}/v1/system/preferences/profile_options"
 
 
+# The options are written as the `profile_options` preference (club_server#98).
+PROFILE_OPTIONS_KEY = "profile_options"
+
+
 @profile_options.command("get")
 @pass_context
 def profile_options_get(ctx: Context):
@@ -3511,17 +3531,20 @@ def profile_options_get(ctx: Context):
 @click.option("--file", type=click.Path(exists=True, dir_okay=False), help="Read the document from a JSON file")
 @pass_context
 def profile_options_set(ctx: Context, json_value: str | None, file: str | None):
-    """Replace the club's positions and languages (admin) and print what is stored.
+    """Replace the club's positions and languages (super admin) and print the stored row.
 
     \b
     The document, whole:
       {"positions": [{"value": "Forward", "label": {"en": "Forward", "mr": "फॉरवर्ड"}}],
        "languages": ["English", "Marathi"]}
 
-    A position's value is what a member's preferredPosition stores; its
-    label names it in each language a form may print it in. Values and
-    languages are distinct and non-empty (422 otherwise). A member's stored
-    choice whose option is removed later stays as it is. Answers 503
+    A position's value is what a member's preferredPositions holds; its
+    label names it in each language a form may print it in, and needs an
+    English (en) one. Values and languages are distinct and non-empty (422
+    INVALID_PREFERENCE_VALUE otherwise). A member's stored choice whose
+    option is removed later stays as it is. The write is the super admin's
+    PATCH /v1/admin/preferences/profile_options, the same as `preferences
+    set profile_options` (club_server#98); anyone else gets 403. Answers 503
     EXTENDED_PROFILE_DISABLED while `capabilities` reports extendedProfile
     false.
 
@@ -3529,7 +3552,9 @@ def profile_options_set(ctx: Context, json_value: str | None, file: str | None):
     Example: profile-options set --json '{"positions": [], "languages": ["English"]}'
     """
     document = _parse_preference_value(json_value, file)
-    print_response(httpx.put(_profile_options_url(ctx), json=document, headers=ctx.headers))
+    print_response(
+        httpx.patch(_preference_url(ctx, PROFILE_OPTIONS_KEY), json={"value": document}, headers=ctx.headers)
+    )
 
 
 # ============================================================================

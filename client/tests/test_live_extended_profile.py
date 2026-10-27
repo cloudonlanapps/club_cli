@@ -2,7 +2,8 @@
 
 cli_test.conf turns the extended profile on and cli_test_modules_off.conf
 turns it off. The fields are stored either way; only `profile-options set`
-answers 503 while it is off.
+answers 503 while it is off. Preferred positions and languages are lists
+(club_server#106, cli #44).
 """
 from __future__ import annotations
 
@@ -38,7 +39,7 @@ def test_issue_38_capabilities_report_extended_profile(live: Live):
 def test_issue_38_member_sets_and_clears_every_own_extended_field(live: Live, tmp_path):
     path = tmp_path / "profile_options.json"
     path.write_text(json.dumps(OPTIONS, ensure_ascii=False), encoding="utf-8")
-    assert live.ok("profile-options", "set", "--file", str(path)) == OPTIONS
+    assert live.ok("profile-options", "set", "--file", str(path))["value"] == OPTIONS
     member = live.active_member()
     assert live.ok("profile-options", "get", user=member, pw=MEMBER_PASSWORD) == OPTIONS
 
@@ -52,11 +53,11 @@ def test_issue_38_member_sets_and_clears_every_own_extended_field(live: Live, tm
     )
     stored = _private(live, member)
     assert {k: stored[k] for k in (
-        "clubDistrict", "preferredPosition", "pastExperience", "nationality", "preferredLanguage", "guardian",
+        "clubDistrict", "preferredPositions", "pastExperience", "nationality", "preferredLanguages", "guardian",
     )} == {
-        "clubDistrict": "Pune District", "preferredPosition": "Forward",
+        "clubDistrict": "Pune District", "preferredPositions": ["Forward"],
         "pastExperience": "Two seasons\nat the rink", "nationality": "Indian",
-        "preferredLanguage": "Marathi",
+        "preferredLanguages": ["Marathi"],
         "guardian": {"name": "Ravi", "relation": "Father", "phone": "9000000001"},
     }
 
@@ -89,7 +90,7 @@ def test_issue_38_a_choice_outside_the_club_options_is_refused(live: Live):
     res = live.refused("me", "update", "--preferred-position", live.unique("Nowhere"), user=member, pw=MEMBER_PASSWORD)
 
     assert "INVALID_PROFILE_OPTION" in res.output
-    assert _private(live, member)["preferredPosition"] is None
+    assert _private(live, member)["preferredPositions"] == []
 
 
 def test_issue_38_admin_sets_and_clears_the_membership_date(live: Live):
@@ -123,3 +124,43 @@ def test_issue_38_an_unapproved_user_sets_their_own_extended_fields(live: Live):
     stored = _private(live, username)
     assert stored["nationality"] == "Indian"
     assert stored["guardian"] == {"name": None, "relation": "Mother", "phone": None}
+
+
+@pytest.mark.modules_on
+def test_issue_44_several_positions_and_languages_are_stored_as_lists(live: Live):
+    live.ok("profile-options", "set", "--json", json.dumps(OPTIONS, ensure_ascii=False))
+    member = live.active_member()
+
+    live.ok(
+        "user", "update", member,
+        "--preferred-position", "Forward", "--preferred-position", "Goalie",
+        "--preferred-language", "English", "--preferred-language", "Marathi",
+    )
+
+    stored = _private(live, member)
+    assert stored["preferredPositions"] == ["Forward", "Goalie"]
+    assert stored["preferredLanguages"] == ["English", "Marathi"]
+
+    live.ok("user", "update", member, "--clear", "preferred-position")
+    assert _private(live, member)["preferredPositions"] == []
+
+
+@pytest.mark.modules_on
+def test_issue_44_one_unknown_value_among_several_is_refused(live: Live):
+    live.ok("profile-options", "set", "--json", json.dumps(OPTIONS, ensure_ascii=False))
+    member = live.active_member()
+
+    res = live.refused(
+        "user", "update", member, "--preferred-position", "Forward", "--preferred-position", live.unique("Nowhere"),
+    )
+
+    assert "INVALID_PROFILE_OPTION" in res.output
+    assert _private(live, member)["preferredPositions"] == []
+
+
+@pytest.mark.modules_on
+def test_issue_44_profile_options_set_is_the_preference_write(live: Live):
+    row = live.ok("profile-options", "set", "--json", json.dumps(OPTIONS, ensure_ascii=False))
+
+    assert row["key"] == "profile_options" and row["value"] == OPTIONS
+    assert live.ok("preferences", "get", "profile_options")["value"] == OPTIONS
