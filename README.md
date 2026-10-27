@@ -114,6 +114,8 @@ club_client -u sudo --pw <pw> user update alice --membership-date 2026-04-01
 club_client -u alice --pw <pw> me update --nationality Indian --clear past-experience
 club_client -u sudo --pw <pw> profile-options get
 club_client -u sudo --pw <pw> profile-options set --file profile_options.json
+club_client -u sudo --pw <pw> profile-options set-languages en=English mr=Marathi kok=Konkani
+club_client -u sudo --pw <pw> profile-options set-languages English Marathi Hindi   # names take their codes
 ```
 
 The guardian options are merged into the stored guardian, so one part can
@@ -126,6 +128,15 @@ are sent as the lists `preferredPositions` and `preferredLanguages`
 `capabilities` reports `extendedProfile` false.
 The fields are stored, and shown by `user get` / `user private`, either way.
 
+The club's languages are `{code, name}` entries, English always among them,
+and English and Marathi until an admin writes them (club_server#133). A
+language written by its name alone takes its code (Marathi `mr`, Konkani
+`kok`; an unknown name `x-<name>`). `profile-options set-languages` replaces
+the languages alone, as `CODE=NAME` or `NAME`, and sends the positions back
+unchanged. A member's `--preferred-language` is a language's name. The same
+languages are the club's application languages: a template prints only in
+them, and labels and library texts are shown and written in them.
+
 ## Applications
 
 `applications` wraps the printable application forms (club_server#93). An
@@ -134,14 +145,21 @@ shape), moves it draft → saved → published, and previews it at any state, or
 member who has uploaded an identity document lists the published ones and
 downloads their own form. Every printed text is a language map, `{lang: text}`,
 and may hold `{name}` gaps that the server fills at print from the template's
-facts (club_server#126). `applications clauses` lists the built-in clauses and
-the club's own texts together (`source` `builtin` with a `key`, or `club` with
-an `id`), as written, gaps included, to copy into a template. The club's own
-texts are kept with `applications library` (admin only).
+facts (club_server#126). The built-in clauses are seeded once into the club's
+library (club_server#133), each with its `key`; from then on they are library
+texts like the club's own (`key` null), edited and deleted with
+`applications library` (admin only), and a deleted one stays deleted.
+`applications clauses` lists the same texts, as written, gaps included, with
+the club's languages and the choices, to copy into a template. The form's
+labels are the club's too: `applications labels` lists them and
+`applications labels set` edits one, in the club's languages, English
+required. A template printing in a language the club lacks is refused with
+`APPLICATION_LANGUAGE_NOT_OFFERED`.
 
 ```bash
-club_client -u sudo --pw <pw> applications labels          # the label catalogue
-club_client -u sudo --pw <pw> applications clauses         # built-in clauses and club texts, with their gaps
+club_client -u sudo --pw <pw> applications labels          # the club's labels
+club_client -u sudo --pw <pw> applications labels set field.full_name --text en 'Full name' --text mr 'पूर्ण नाव'
+club_client -u sudo --pw <pw> applications clauses         # the library texts (built-ins with their key), gaps as written
 club_client -u sudo --pw <pw> applications library list
 club_client -u sudo --pw <pw> applications library create --kind rule --name Fee \
   --heading en Fee --text en 'A fee of ₹{amount} is payable.' --text mr '₹{amount} शुल्क भरावे.'
@@ -167,7 +185,8 @@ a draft is refused with `APPLICATION_NOT_SAVED` (club_server#129). A member who 
 category picks one with `--category <index>` (`applications show` lists the
 ones they fit as `fittingCategories`); otherwise the form is refused with
 `APPLICATION_CATEGORY_REQUIRED` (club_server#108). `save` is refused with
-`APPLICATION_INCOMPLETE` (each text is named with the print languages it lacks),
+`APPLICATION_INCOMPLETE` (each text, or club label as `labels.<key>`, is named with the print languages it lacks),
+`APPLICATION_LANGUAGE_NOT_OFFERED` (a print language the club has since removed),
 `APPLICATION_INVALID_REFERENCE`, `APPLICATION_UNKNOWN_FACT` (each place,
 language and `{gap}` that names no fact of the template) or
 `APPLICATION_DOES_NOT_FIT` (the overflow in points); each refusal gets a one-line hint on stderr. Applications need

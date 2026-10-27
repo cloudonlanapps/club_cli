@@ -325,9 +325,16 @@ ERROR_HINTS = {
         "(`applications show <id>` lists them)."
     ),
     "APPLICATION_INVALID_REFERENCE": (
-        "the template's languages are not [\"en\"] or [\"en\", one other], a label lacks a print "
-        "language (`applications labels`), or a choices fact names a choice the library lacks "
-        "(`applications clauses` lists the choices)."
+        "the template's languages are not [\"en\"] or [\"en\", one other], a label override lacks a "
+        "print language or names no label (`applications labels`), or a choices fact names a choice "
+        "the library lacks (`applications clauses` lists the choices)."
+    ),
+    "APPLICATION_LANGUAGE_NOT_OFFERED": (
+        "a template prints, and a text is written, only in the club's languages: add the language "
+        "with `profile-options set-languages`, or drop it (`profile-options get` lists them)."
+    ),
+    "APPLICATION_LABEL_NOT_FOUND": (
+        "no such label; `applications labels` lists their keys."
     ),
     "APPLICATION_UNKNOWN_FACT": (
         "a {gap} in a printed text names no fact of the template: add the fact to the template's "
@@ -338,7 +345,8 @@ ERROR_HINTS = {
     ),
     "APPLICATION_INCOMPLETE": (
         "save needs the title, declaration and footer line, and every printed text in each print "
-        "language; add them with `applications update <id>`."
+        "language; add them with `applications update <id>`. A club label (labels.<key>) lacking a "
+        "print language is written with `applications labels set <key>`."
     ),
     "APPLICATION_CATEGORY_REQUIRED": (
         "the member fits more than one age category: choose one with "
@@ -376,6 +384,9 @@ def explain_error(data: Any) -> str | None:
             for m in details["missing"]
         ]
         hint += f" Missing: {'; '.join(texts)}."
+    if code == "APPLICATION_LANGUAGE_NOT_OFFERED" and details.get("languages"):
+        # {languages: [code]} (club_server#133, cli #60).
+        hint += f" Languages: {', '.join(str(lang) for lang in details['languages'])}."
     if code in ("APPLICATION_CATEGORY_REQUIRED", "APPLICATION_CATEGORY_NOT_FITTING") and details.get("categories"):
         hint += f" Fits categories: {', '.join(str(i) for i in details['categories'])}."
     if code == "APPLICATION_UNKNOWN_FACT" and details.get("gaps"):
@@ -3552,10 +3563,13 @@ PROFILE_OPTIONS_KEY = "profile_options"
 @profile_options.command("get")
 @pass_context
 def profile_options_get(ctx: Context):
-    """The club's options: {positions: [{value, label: {lang: text}}], languages: [...]}.
+    """The club's options: {positions: [{value, label: {code: text}}], languages: [{code, name}]}.
 
-    Any signed-in user may read them, approved or not; both lists are empty
-    until an admin writes them.
+    Any signed-in user may read them, approved or not. Until an admin
+    writes them there are no positions and the languages are English and
+    Marathi. The languages are also the club's application languages: the
+    ones a template prints in and a label or library text is written in
+    (club_server#133). A member's preferredLanguages hold their names.
 
     Example: profile-options get
     """
@@ -3572,12 +3586,18 @@ def profile_options_set(ctx: Context, json_value: str | None, file: str | None):
     \b
     The document, whole:
       {"positions": [{"value": "Forward", "label": {"en": "Forward", "mr": "फॉरवर्ड"}}],
-       "languages": ["English", "Marathi"]}
+       "languages": [{"code": "en", "name": "English"}, {"code": "mr", "name": "Marathi"}]}
 
-    A position's value is what a member's preferredPositions holds; its
-    label names it in each language a form may print it in, and needs an
-    English (en) one. Values and languages are distinct and non-empty (422
-    INVALID_PREFERENCE_VALUE otherwise). A member's stored choice whose
+    A language is {code, name}, or its name alone, which takes its code
+    (English en, Marathi mr, Hindi hi, Konkani kok, ...; any other name
+    x-<name>). English (en) is always one of them; codes and names are
+    distinct. The languages are the club's application languages
+    (club_server#133): a removed one hides its translations, and adding it
+    back shows them again. A position's value is what a member's
+    preferredPositions holds; its label names it in the club's languages,
+    keyed by code, and needs an English (en) one. Values are distinct and
+    non-empty (422 INVALID_PREFERENCE_VALUE otherwise). To change the
+    languages alone, use `profile-options set-languages`. A member's stored choice whose
     option is removed later stays as it is. The write is the super admin's
     PATCH /v1/admin/preferences/profile_options, the same as `preferences
     set profile_options` (club_server#98); anyone else gets 403. Answers 503
@@ -3585,9 +3605,53 @@ def profile_options_set(ctx: Context, json_value: str | None, file: str | None):
     false.
 
     Example: profile-options set --file profile_options.json
-    Example: profile-options set --json '{"positions": [], "languages": ["English"]}'
+    Example: profile-options set --json '{"positions": [], "languages": ["English", "Marathi"]}'
     """
     document = _parse_preference_value(json_value, file)
+    print_response(
+        httpx.patch(_preference_url(ctx, PROFILE_OPTIONS_KEY), json={"value": document}, headers=ctx.headers)
+    )
+
+
+def profile_language(value: str) -> dict[str, str] | str:
+    """CODE=NAME as {code, name}; a NAME alone is sent as written, and the server gives it its code."""
+    if "=" not in value:
+        if not value.strip():
+            raise click.UsageError("A language needs a name.")
+        return value
+    code, name = (part.strip() for part in value.split("=", 1))
+    if not code or not name:
+        raise click.UsageError(f"{value!r}: write a language as CODE=NAME (en=English) or as its NAME.")
+    return {"code": code, "name": name}
+
+
+@profile_options.command("set-languages")
+@click.argument("languages", nargs=-1, required=True, metavar="LANGUAGE...")
+@pass_context
+def profile_options_set_languages(ctx: Context, languages: tuple[str, ...]):
+    """Replace the club's languages (super admin), keeping its positions; prints the stored row.
+
+    Each LANGUAGE is CODE=NAME (en=English, kok=Konkani) or a NAME alone,
+    which takes its code (Marathi → mr; an unknown name → x-<name>). The
+    list replaces the whole list, in order, and needs English. These are the
+    club's application languages too (club_server#133): what a template may
+    print in, and the languages its labels and library texts are shown and
+    written in. A removed language hides its translations, kept for when it
+    is added back; one added shows blank translations until they are
+    written. The positions are read first and sent back unchanged, so a
+    position labelled in a removed language → 422. Writes the same
+    preference as `profile-options set`.
+
+    Example: profile-options set-languages en=English mr=Marathi
+    Example: profile-options set-languages English Marathi Hindi
+    """
+    entries = [profile_language(value) for value in languages]
+    current = httpx.get(_profile_options_url(ctx), headers=ctx.headers)
+    if current.status_code >= 400:
+        click.echo("Stopped: the languages were not written.", err=True)
+        print_response(current)
+        return
+    document = {"positions": current.json().get("positions") or [], "languages": entries}
     print_response(
         httpx.patch(_preference_url(ctx, PROFILE_OPTIONS_KEY), json={"value": document}, headers=ctx.headers)
     )
@@ -3601,7 +3665,9 @@ APPLICATION_STATUSES = ["draft", "saved", "published"]
 
 APPLICATION_TEMPLATE_HELP = """\b
     The template, every field optional on create:
-      languages      ["en"] or ["en", "mr"|"hi"]: the form's print languages
+      languages      ["en"] or ["en", one other]: the form's print languages,
+                     each one of the club's languages (`profile-options
+                     get`; another → 422 APPLICATION_LANGUAGE_NOT_OFFERED)
       facts          {name: {"type": "date"|"time"|"amount"|"name"|"choices", "value": ...}}
                      or {name: {"type": "date_range", "from": ms, "to": ms}};
                      dates are UTC-midnight ms, a time "H:MM", an amount a
@@ -3625,7 +3691,9 @@ APPLICATION_TEMPLATE_HELP = """\b
     or a club text, copy its text (and heading, for a rule) from
     `applications clauses` as written, gaps included, and give the
     template a fact for each gap. Label overrides, age-category labels and
-    fact values print as written. A shape that does not fit → 422."""
+    fact values print as written. Texts are written in the club's
+    languages; read back, a template shows only those. A shape that does
+    not fit → 422."""
 
 
 def application_template_help(command):
@@ -3779,13 +3847,16 @@ def applications_save(ctx: Context, application_id: int):
 
     Refused, and left a draft, with 422 APPLICATION_INCOMPLETE
     (details.missing: [{field, languages}], each text and the print languages
-    it lacks), APPLICATION_INVALID_REFERENCE
+    it lacks; a club label it does not override is labels.<key>),
+    APPLICATION_LANGUAGE_NOT_OFFERED (a print language the club has since
+    removed; details.languages), APPLICATION_INVALID_REFERENCE
     (languages not ["en"] or ["en", one other], or a label without a print
     language), APPLICATION_UNKNOWN_FACT (details.gaps: [{place, language,
     gap}], each {gap} in a printed text that names no fact of the template,
     in print order; club_server#126) or APPLICATION_DOES_NOT_FIT
     (details.overflowPt: the details alone overflow page 1 by that many
-    points). The layout is measured on the texts with their gaps filled.
+    points). The layout is measured on the texts with their gaps filled,
+    and keeps the club's labels as they are at save.
 
     Example: applications save 3
     """
@@ -3825,16 +3896,46 @@ def applications_revert(ctx: Context, application_id: int):
     print_response(httpx.post(f"{ctx.base_url}/v1/applications/{application_id}/revert", headers=ctx.headers))
 
 
-@applications.command("labels")
-@pass_context
-def applications_labels(ctx: Context):
-    """The label catalogue (admin): {languages, labels: {id: {lang: text}}}.
+@applications.group("labels", invoke_without_command=True)
+@click.pass_context
+def applications_labels(click_ctx: click.Context):
+    """The club's labels (admin): {languages, labels: {key: {code: text}}}; `set` edits one.
 
-    A template's labelOverrides replace a label by its id.
+    The form's fixed wording, seeded once from the server's catalogue and
+    then the club's own (club_server#133), shown in the club's languages
+    (`profile-options get`). A template's labelOverrides replace a label
+    on its form by its key. Alone, `applications labels` lists them.
 
     Example: applications labels
+    Example: applications labels set field.full_name --text en 'Full name' --text mr 'पूर्ण नाव'
     """
-    print_response(httpx.get(f"{ctx.base_url}/v1/applications/labels", headers=ctx.headers))
+    if click_ctx.invoked_subcommand is None:
+        ctx: Context = click_ctx.find_object(Context)  # type: ignore[assignment]
+        print_response(httpx.get(f"{ctx.base_url}/v1/applications/labels", headers=ctx.headers))
+
+
+@applications_labels.command("set")
+@click.argument("key")
+@click.option(
+    "--text", "text", type=(str, str), multiple=True, required=True, metavar="LANG TEXT",
+    help="The label in one of the club's languages; repeat per language (English required)",
+)
+@pass_context
+def applications_labels_set(ctx: Context, key: str, text: tuple[tuple[str, str], ...]):
+    """Change one label's text (admin); prints {key, text}.
+
+    The text replaces the label in the club's languages: English is
+    required, and a club language left out becomes blank (save then refuses
+    a template printing in it). Translations in languages the club has
+    removed are kept. A template already saved keeps the labels it was
+    saved with; the edit reaches templates saved after it. An unknown key →
+    404 APPLICATION_LABEL_NOT_FOUND; no English or a blank text → 422; a
+    language the club does not have → 422 APPLICATION_LANGUAGE_NOT_OFFERED.
+
+    Example: applications labels set field.full_name --text en 'Full name' --text mr 'पूर्ण नाव'
+    """
+    body = {"text": language_map("--text", text)}
+    print_response(httpx.patch(f"{ctx.base_url}/v1/applications/labels/{key}", json=body, headers=ctx.headers))
 
 
 @applications.command("clauses")
@@ -3843,15 +3944,16 @@ def applications_clauses(ctx: Context):
     """The texts an editor can paste (admin): {languages, choices, clauses: [...]}.
 
     \b
-    clauses is a list (club_server#126): the built-in clauses first, in
-    library order, then the club's own texts, oldest first. Each is
-      {source: "builtin"|"club", key, id, kind, name, gaps, heading, text}
-    a built-in clause has its key (e.g. "rule.fee") and gaps ({gap: fact
-    type}), with id and name null; a club text has its id and name (from
-    `applications library`), with key and gaps null. text and heading
-    ({lang: text}, heading a rule's only) come as written, {gap}s
-    included: copy them into a template and give it a fact for each gap.
-    choices are the ids a choices fact takes.
+    clauses is the club's library (club_server#133), oldest first, each
+    text as `applications library` returns it:
+      {id, key, kind, name, heading, text, createdBy, createdAtUtc, updatedAtUtc}
+    The built-in clauses are seeded into the library once, each with its
+    key (e.g. "rule.fee"); a text the club wrote has key null. Every one is
+    edited and deleted with `applications library`. text and heading
+    ({code: text}, heading a rule's only) are shown in the club's
+    languages, which `languages` lists, as written, {gap}s included: copy
+    them into a template and give it a fact for each gap. choices are the
+    ids a choices fact takes.
 
     Example: applications clauses
     """
@@ -3863,13 +3965,15 @@ def applications_clauses(ctx: Context):
 LIBRARY_TEXT_KINDS = ["header", "selection", "declaration", "rule", "note"]
 
 LIBRARY_TEXT_HELP = """\b
-    A club text is {id, kind, name, heading, text, createdBy, createdAtUtc,
-    updatedAtUtc}: kind one of header, selection, declaration, rule, note;
-    name 1-100 characters, for the editor's picker; text, and a rule's
-    heading, {lang: text} in the library languages (en, mr, hi), at least
-    one, each non-empty, {gap}s allowed. --text LANG TEXT and --heading
-    LANG TEXT give one language each and repeat. A heading on any kind but
-    rule → 422."""
+    A club text is {id, key, kind, name, heading, text, createdBy,
+    createdAtUtc, updatedAtUtc}: key names the built-in clause a seeded
+    text came from (null for one the club wrote; not writable); kind one
+    of header, selection, declaration, rule, note; name 1-100 characters,
+    for the editor's picker; text, and a rule's heading, {code: text} in
+    the club's languages (`profile-options get`; another → 422
+    APPLICATION_LANGUAGE_NOT_OFFERED), at least one, each non-empty,
+    {gap}s allowed. --text LANG TEXT and --heading LANG TEXT give one
+    language each and repeat. A heading on any kind but rule → 422."""
 
 
 def library_text_help(command):
@@ -3898,8 +4002,11 @@ def _library_url(ctx: Context, text_id: int | None = None) -> str:
 def applications_library():
     """The club's own texts for templates (admin): list, get, create, update, delete.
 
-    One library for the whole club, next to the built-in clauses;
-    `applications clauses` lists both. A coach or member → 403, and while
+    One library for the whole club. The built-in clauses are seeded into it
+    once (club_server#133), each with its key, and from then on are club
+    texts like any other: edited and deleted here, and a deleted one stays
+    deleted. `applications clauses` lists the same texts with the club's
+    languages and the choices. A coach or member → 403, and while
     `capabilities` reports applications false → 503 APPLICATIONS_DISABLED.
     An unknown id → 404 APPLICATION_LIBRARY_TEXT_NOT_FOUND.
     """
@@ -3909,7 +4016,7 @@ def applications_library():
 @applications_library.command("list")
 @pass_context
 def applications_library_list(ctx: Context):
-    """Every club text, oldest first: a list of {id, kind, name, heading, text, ...}.
+    """Every club text, oldest first, seeded built-ins included: a list of {id, key, kind, name, heading, text, ...}.
 
     Example: applications library list
     """
@@ -3978,7 +4085,8 @@ def applications_library_update(
     """Change a club text (admin): each field given replaces the stored one.
 
     A field left out keeps its value. --text and --heading replace the
-    whole language map, so give every language to keep. The result must
+    whole map in the club's languages, so give every language to keep;
+    translations in languages the club has removed are kept. The result must
     still be a valid text: a heading left on a text whose kind is no
     longer rule → 422 and nothing changes (pass --clear-heading with
     --kind). Templates that copied the text keep their copy.
