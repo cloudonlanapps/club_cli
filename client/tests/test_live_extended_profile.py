@@ -20,7 +20,7 @@ OPTIONS = {
         {"value": "Forward", "label": {"en": "Forward", "mr": "फॉरवर्ड"}},
         {"value": "Goalie", "label": {"en": "Goalie"}},
     ],
-    "languages": ["English", "Marathi"],
+    "languages": [{"code": "en", "name": "English"}, {"code": "mr", "name": "Marathi"}],
 }
 
 
@@ -164,3 +164,38 @@ def test_issue_44_profile_options_set_is_the_preference_write(live: Live):
 
     assert row["key"] == "profile_options" and row["value"] == OPTIONS
     assert live.ok("preferences", "get", "profile_options")["value"] == OPTIONS
+
+
+# ── the club's languages as {code, name} (club_server#133, cli #60) ─────
+
+
+@pytest.mark.modules_on
+def test_issue_60_a_language_written_by_name_takes_its_code(live: Live):
+    named = {**OPTIONS, "languages": ["English", "Marathi"]}
+
+    row = live.ok("profile-options", "set", "--json", json.dumps(named, ensure_ascii=False))
+
+    assert row["value"] == OPTIONS
+    assert live.ok("profile-options", "get")["languages"] == OPTIONS["languages"]
+
+
+@pytest.mark.modules_on
+def test_issue_60_set_languages_replaces_the_languages_and_keeps_the_positions(live: Live):
+    live.ok("profile-options", "set", "--json", json.dumps(OPTIONS, ensure_ascii=False))
+    try:
+        row = live.ok("profile-options", "set-languages", "en=English", "Marathi", "kok=Konkani")
+
+        assert row["value"]["positions"] == OPTIONS["positions"]
+        assert row["value"]["languages"] == [
+            {"code": "en", "name": "English"}, {"code": "mr", "name": "Marathi"}, {"code": "kok", "name": "Konkani"},
+        ]
+        assert "kok" in live.ok("applications", "labels")["languages"]
+    finally:
+        live.ok("profile-options", "set", "--json", json.dumps(OPTIONS, ensure_ascii=False))
+
+
+@pytest.mark.modules_on
+def test_issue_60_the_languages_need_english(live: Live):
+    res = live.refused("profile-options", "set-languages", "mr=Marathi")
+
+    assert "English" in res.output
