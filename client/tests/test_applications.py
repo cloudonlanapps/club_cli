@@ -231,6 +231,76 @@ def test_issue_38_a_refused_form_writes_nothing(monkeypatch, tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
+# ── The age-category choice on download (club_server#108, cli #46) ──────
+
+
+def test_issue_46_own_form_sends_the_category(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    fake = FakeHttp().install(monkeypatch)
+    fake.on("GET", f"{A}/7/form", responder=lambda _c: _pdf(b"%PDF mine"))
+
+    res = run("applications", "form", "7", "--category", "1")
+
+    assert res.exit_code == 0, res.output
+    (call,) = fake.calls_to("GET", f"{A}/7/form")
+    assert call.params == {"category": 1}
+    assert (tmp_path / "application-7-sudo.pdf").read_bytes() == b"%PDF mine"
+
+
+def test_issue_46_a_members_form_sends_the_category(monkeypatch, tmp_path):
+    fake = FakeHttp().install(monkeypatch)
+    fake.on("GET", f"{A}/7/form/alice", responder=lambda _c: _pdf(b"%PDF alice"))
+
+    res = run("applications", "form", "7", "--user", "alice", "--category", "0", "-o", str(tmp_path / "a.pdf"))
+
+    assert res.exit_code == 0, res.output
+    assert fake.calls_to("GET", f"{A}/7/form/alice")[0].params == {"category": 0}
+
+
+def test_issue_46_without_a_category_none_is_sent(monkeypatch, tmp_path):
+    fake = FakeHttp().install(monkeypatch)
+    fake.on("GET", f"{A}/7/form", responder=lambda _c: _pdf(b"%PDF"))
+
+    res = run("applications", "form", "7", "-o", str(tmp_path / "f.pdf"))
+
+    assert res.exit_code == 0, res.output
+    assert not fake.calls_to("GET", f"{A}/7/form")[0].params
+
+
+def test_issue_46_a_negative_category_is_refused(monkeypatch, tmp_path):
+    fake = FakeHttp().install(monkeypatch)
+
+    res = run("applications", "form", "7", "--category", "-1", "-o", str(tmp_path / "f.pdf"))
+
+    assert res.exit_code != 0
+    assert fake.calls == []
+
+
+@pytest.mark.parametrize("code", ["APPLICATION_CATEGORY_REQUIRED", "APPLICATION_CATEGORY_NOT_FITTING"])
+def test_issue_46_a_category_refusal_names_the_fitting_ones(monkeypatch, tmp_path, code):
+    monkeypatch.chdir(tmp_path)
+    fake = FakeHttp().install(monkeypatch)
+    fake.on("GET", f"{A}/7/form", _refusal(code, categories=[0, 2]), status=422)
+
+    res = run("applications", "form", "7")
+
+    assert res.exit_code != 0
+    hint = res.stderr.strip().splitlines()[-1]
+    assert hint.startswith(f"{code}: ")
+    assert "--category" in hint
+    assert hint.endswith("Fits categories: 0, 2.")
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_issue_46_form_and_show_help_explain_the_choice():
+    form = " ".join(CliRunner().invoke(main, ["applications", "form", "--help"]).output.split())
+    show = " ".join(CliRunner().invoke(main, ["applications", "show", "--help"]).output.split())
+
+    for word in ("--category", "APPLICATION_CATEGORY_REQUIRED", "APPLICATION_CATEGORY_NOT_FITTING", "fittingCategories"):
+        assert word in form, word
+    assert "fittingCategories" in show
+
+
 # ── Refusals ────────────────────────────────────────────────────────────
 
 

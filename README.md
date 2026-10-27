@@ -149,10 +149,14 @@ club_client -u sudo --pw <pw> applications publish 3
 club_client -u sudo --pw <pw> applications list --status published --limit 50
 club_client -u sudo --pw <pw> applications form 3 --user alice
 club_client -u alice --pw <pw> applications form 3         # writes application-3-alice.pdf
+club_client -u alice --pw <pw> applications form 3 --category 1   # fits several age categories
 ```
 
 The PDF commands write `-o FILE`, or by default `application-<id>-<username>.pdf`
-in the current directory, and print the path. `save` is refused with
+in the current directory, and print the path. A member who fits more than one age
+category picks one with `--category <index>` (`applications show` lists the
+ones they fit as `fittingCategories`); otherwise the form is refused with
+`APPLICATION_CATEGORY_REQUIRED` (club_server#108). `save` is refused with
 `APPLICATION_INCOMPLETE` (each text is named with the print languages it lacks),
 `APPLICATION_INVALID_REFERENCE` or `APPLICATION_DOES_NOT_FIT` (the overflow in
 points); each refusal gets a one-line hint on stderr. Applications need

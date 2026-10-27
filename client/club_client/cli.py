@@ -329,6 +329,14 @@ ERROR_HINTS = {
         "save needs the title, declaration and footer line, and every printed text in each print "
         "language; add them with `applications update <id>`."
     ),
+    "APPLICATION_CATEGORY_REQUIRED": (
+        "the member fits more than one age category: choose one with "
+        "`applications form <id> --category <index>`."
+    ),
+    "APPLICATION_CATEGORY_NOT_FITTING": (
+        "the member does not fit that age category: choose one they fit with "
+        "`applications form <id> --category <index>`."
+    ),
     "APPLICATION_DOES_NOT_FIT": (
         "the details alone do not fit page 1; shorten what page 1 prints (header, selections, "
         "declaration) with `applications update <id>`."
@@ -357,6 +365,8 @@ def explain_error(data: Any) -> str | None:
             for m in details["missing"]
         ]
         hint += f" Missing: {'; '.join(texts)}."
+    if code in ("APPLICATION_CATEGORY_REQUIRED", "APPLICATION_CATEGORY_NOT_FITTING") and details.get("categories"):
+        hint += f" Fits categories: {', '.join(str(i) for i in details['categories'])}."
     if code == "APPLICATION_DOES_NOT_FIT" and details.get("overflowPt") is not None:
         hint += f" Over by {details['overflowPt']} pt."
     return f"{code}: {hint}"
@@ -3663,7 +3673,10 @@ def applications_show(ctx: Context, application_id: int):
     """One template: its content, status, layout (once saved), createdBy and times.
 
     A member reads published ones only (404 APPLICATION_NOT_FOUND otherwise),
-    and needs an identity document (422 IDENTITY_DOCUMENT_REQUIRED).
+    and needs an identity document (422 IDENTITY_DOCUMENT_REQUIRED). For a
+    member it adds fittingCategories, the indexes (from 0) of the
+    ageCategories they fit, which `applications form --category` takes
+    (club_server#108); null for an admin.
 
     Example: applications show 3
     """
@@ -3873,9 +3886,15 @@ def applications_preview(ctx: Context, application_id: int, output: str | None):
 @applications.command("form")
 @click.argument("application_id", type=int)
 @click.option("--user", "username", help="Download this member's form (admin); default: your own")
+@click.option(
+    "--category", type=click.IntRange(min=0),
+    help="The age category to tick, by its index in ageCategories (from 0); needed when the member fits several",
+)
 @click.option("--output", "-o", help="Output file (default: application-<id>-<username>.pdf)")
 @pass_context
-def applications_form(ctx: Context, application_id: int, username: str | None, output: str | None):
+def applications_form(
+    ctx: Context, application_id: int, username: str | None, category: int | None, output: str | None,
+):
     """Download a filled form of a published application as a PDF.
 
     Without --user, your own form: you need an identity document (422
@@ -3885,13 +3904,22 @@ def applications_form(ctx: Context, application_id: int, username: str | None, o
     APPLICATION_NOT_PUBLISHED, an unknown user → 404 USER_NOT_FOUND. Prints
     the path written.
 
+    Age categories may overlap (club_server#108). --category ticks one by
+    its index; a member who fits several and names none → 422
+    APPLICATION_CATEGORY_REQUIRED, one they do not fit → 422
+    APPLICATION_CATEGORY_NOT_FITTING, each naming the categories they fit
+    (`applications show` as the member lists them as fittingCategories).
+
     Example: applications form 3
+    Example: applications form 3 --category 1
     Example: applications form 3 --user alice -o alice.pdf
     """
+    params = {"category": category} if category is not None else None
     if username:
-        response = httpx.get(f"{ctx.base_url}/v1/applications/{application_id}/form/{username}", headers=ctx.headers)
+        url = f"{ctx.base_url}/v1/applications/{application_id}/form/{username}"
     else:
-        response = httpx.get(f"{ctx.base_url}/v1/applications/{application_id}/form", headers=ctx.headers)
+        url = f"{ctx.base_url}/v1/applications/{application_id}/form"
+    response = httpx.get(url, params=params, headers=ctx.headers)
     _write_pdf(response, output, f"application-{application_id}-{username or ctx.username}.pdf")
 
 

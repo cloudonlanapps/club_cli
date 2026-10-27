@@ -296,3 +296,34 @@ def test_issue_38_a_member_outside_every_age_category_is_refused(live: Live, tmp
 
     assert "APPLICATION_NOT_ELIGIBLE" in res.output
     assert not (tmp_path / "x.pdf").exists()
+
+
+@pytest.mark.modules_on
+def test_issue_46_a_member_fitting_two_categories_chooses_one(live: Live, tmp_path):
+    body = template(live, live.unique("Overlap"))
+    # live.member_json is born 2012: it fits the first two, not the third.
+    body["ageCategories"] = [
+        {"label": {"en": "Under 17", "mr": "१७ वर्षांखालील"}, "bornOnOrAfterUtc": day(2010, 1, 1)},
+        {"label": {"en": "Juniors", "mr": "कनिष्ठ"}, "bornOnOrBeforeUtc": day(2014, 12, 31)},
+        {"label": {"en": "Seniors", "mr": "वरिष्ठ"}, "bornOnOrBeforeUtc": day(2000, 1, 1)},
+    ]
+    app_id = str(_published(live, body))
+    member = _member_with_document(live)
+    as_member = {"user": member, "pw": MEMBER_PASSWORD}
+
+    assert live.ok("applications", "show", app_id, **as_member)["fittingCategories"] == [0, 1]
+    assert live.ok("applications", "show", app_id)["fittingCategories"] is None
+
+    required = live.refused("applications", "form", app_id, "-o", str(tmp_path / "x.pdf"), **as_member)
+    assert "APPLICATION_CATEGORY_REQUIRED" in required.output
+    assert "Fits categories: 0, 1." in required.stderr
+    not_fitting = live.refused("applications", "form", app_id, "--category", "2", "-o", str(tmp_path / "x.pdf"), **as_member)
+    assert "APPLICATION_CATEGORY_NOT_FITTING" in not_fitting.output
+    assert not (tmp_path / "x.pdf").exists()
+
+    own = tmp_path / "own.pdf"
+    live.ok("applications", "form", app_id, "--category", "1", "-o", str(own), **as_member)
+    assert own.read_bytes().startswith(b"%PDF")
+    theirs = tmp_path / "theirs.pdf"
+    live.ok("applications", "form", app_id, "--user", member, "--category", "0", "-o", str(theirs))
+    assert theirs.read_bytes().startswith(b"%PDF")
