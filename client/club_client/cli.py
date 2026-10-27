@@ -321,8 +321,9 @@ ERROR_HINTS = {
         "(`applications show <id>` lists them)."
     ),
     "APPLICATION_INVALID_REFERENCE": (
-        "a text names a clause the library lacks, a fact the template lacks, or a fact of the "
-        "wrong type for its gap; `applications clauses` lists each clause's gaps and their types."
+        "the clause is not in the library, or a gap has no fact, a fact fills no gap, or a fact "
+        "has the wrong type or an unknown choice (`applications clauses` lists each clause's gaps "
+        "and their types); on save, a label lacks a print language (`applications labels`)."
     ),
     "APPLICATION_INCOMPLETE": (
         "save needs the title, declaration and footer line, and every printed text in each print "
@@ -3576,12 +3577,14 @@ APPLICATION_TEMPLATE_HELP = """\b
       ageCategories  [{"label": {lang: text}, "bornOnOrAfterUtc"?, "bornOnOrBeforeUtc"?,
                        "genders"?: ["male"|"female"|"other"|"prefer_not_to_say"]}]
       selections     a list of printed texts
-      terms          [{"clause": id, "args"?} | {"heading": text, "body": text}]
-      termsNotes     [{"clause": id, "args"?} | {"text": text, "attribution"?: text}]
+      terms          [{"heading": {lang: text}, "body": {lang: text}}]
+      termsNotes     [{"text": {lang: text}, "attribution"?: {lang: text}}]
       labelOverrides {label id: {lang: text}}  (ids from `applications labels`)
-    A printed text is {lang: text}, a library clause {"clause": id, "args":
-    {gap: fact}} (`applications clauses`), or a fact on its own {"fact": name}.
-    A shape that does not fit → 422."""
+    A printed text is {lang: text} and nothing else (club_server#107): a
+    {"clause": ...} or {"fact": ...} reference anywhere → 422. To use a
+    library clause, fill it with `applications fill-clause` and paste its
+    text (and heading, for a rule) in. facts are kept for the editor and
+    never printed. A shape that does not fit → 422."""
 
 
 def application_template_help(command):
@@ -3730,8 +3733,8 @@ def applications_save(ctx: Context, application_id: int):
 
     Refused, and left a draft, with 422 APPLICATION_INCOMPLETE (details.missing
     names each text lacking details.language), APPLICATION_INVALID_REFERENCE
-    (an unknown clause, a missing fact, a fact of the wrong type) or
-    APPLICATION_DOES_NOT_FIT (details.overflowPt: the details alone overflow
+    (languages not ["en"] or ["en", one other], or a label without a print
+    language) or APPLICATION_DOES_NOT_FIT (details.overflowPt: the details alone overflow
     page 1 by that many points).
 
     Example: applications save 3
@@ -3789,12 +3792,60 @@ def applications_labels(ctx: Context):
 def applications_clauses(ctx: Context):
     """The clause library (admin): {languages, choices, clauses: {id: {kind, gaps, heading?, text}}}.
 
-    Each clause's gaps name the fact type each takes; a template's text uses
-    one as {"clause": id, "args": {gap: fact}}.
+    Each clause's gaps name the fact type each takes; `applications
+    fill-clause` fills one with facts for its gaps, for a template's text.
 
     Example: applications clauses
     """
     print_response(httpx.get(f"{ctx.base_url}/v1/applications/clauses", headers=ctx.headers))
+
+
+@applications.command("fill-clause")
+@click.argument("clause")
+@click.option("--facts", "facts_value", help="The facts for the clause's gaps as inline JSON: {gap: fact}")
+@click.option("--file", type=click.Path(exists=True, dir_okay=False), help="Read the facts from a JSON file")
+@pass_context
+def applications_fill_clause(ctx: Context, clause: str, facts_value: str | None, file: str | None):
+    """Fill one library clause (admin): its text in every library language.
+
+    \b
+    CLAUSE is a clause id from `applications clauses`; the facts give a
+    fact for each of its gaps, of the type the gap names:
+      {gap: {"type": "date"|"time"|"amount"|"name"|"choices", "value": ...}}
+      {gap: {"type": "date_range", "from": ms, "to": ms}}
+    (dates are UTC-midnight ms). A clause without gaps needs no facts.
+
+    Prints {clause, heading, text}: text is {lang: text}, and heading is
+    {lang: text} for a rule (null otherwise). Paste them into a template's
+    printed texts (a rule as {"heading": ..., "body": text}); no template
+    is read or changed. An unknown clause, a gap without a fact, a fact for
+    no gap, a fact of the wrong type or an unknown choice → 422
+    APPLICATION_INVALID_REFERENCE (club_server#107).
+
+    Example: applications fill-clause rule.fee --facts '{"amount": {"type": "amount", "value": 1500}}'
+    Example: applications fill-clause header.training_camp --file camp_facts.json
+    Example: applications fill-clause declaration.trial
+    """
+    if facts_value is not None and file is not None:
+        raise click.UsageError("Pass at most one of --facts '<json>' or --file <path>.")
+    facts: Any = {}
+    if file is not None:
+        with open(file) as f:
+            facts = json.load(f)
+    elif facts_value is not None:
+        try:
+            facts = json.loads(facts_value)
+        except json.JSONDecodeError as e:
+            raise click.UsageError(f"--facts must be a JSON object {{gap: fact}}: {e}")
+    if not isinstance(facts, dict):
+        raise click.UsageError("The facts must be a JSON object {gap: fact}.")
+    print_response(
+        httpx.post(
+            f"{ctx.base_url}/v1/applications/clauses/fill",
+            json={"clause": clause, "facts": facts},
+            headers=ctx.headers,
+        )
+    )
 
 
 @applications.command("preview")
