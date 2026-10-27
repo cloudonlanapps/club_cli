@@ -132,15 +132,21 @@ The fields are stored, and shown by `user get` / `user private`, either way.
 admin writes a template as JSON (`applications create --help` shows its
 shape), moves it draft → saved → published, and previews it at any state; a
 member who has uploaded an identity document lists the published ones and
-downloads their own form. Every printed text is a language map, `{lang: text}`: to use a
-library clause, `fill-clause` fills its gaps and prints its text (and a
-rule's heading) in every library language, to paste into the template
-(club_server#107).
+downloads their own form. Every printed text is a language map, `{lang: text}`,
+and may hold `{name}` gaps that the server fills at print from the template's
+facts (club_server#126). `applications clauses` lists the built-in clauses and
+the club's own texts together (`source` `builtin` with a `key`, or `club` with
+an `id`), as written, gaps included, to copy into a template. The club's own
+texts are kept with `applications library` (admin only).
 
 ```bash
 club_client -u sudo --pw <pw> applications labels          # the label catalogue
-club_client -u sudo --pw <pw> applications clauses         # the clause library and its gaps
-club_client -u sudo --pw <pw> applications fill-clause rule.fee --facts '{"amount": {"type": "amount", "value": 1500}}'
+club_client -u sudo --pw <pw> applications clauses         # built-in clauses and club texts, with their gaps
+club_client -u sudo --pw <pw> applications library list
+club_client -u sudo --pw <pw> applications library create --kind rule --name Fee \
+  --heading en Fee --text en 'A fee of ₹{amount} is payable.' --text mr '₹{amount} शुल्क भरावे.'
+club_client -u sudo --pw <pw> applications library update 4 --kind note --clear-heading
+club_client -u sudo --pw <pw> applications library delete 4  # or get 4
 club_client -u sudo --pw <pw> applications create --file trial.json
 club_client -u sudo --pw <pw> applications update 3 --json '{"subtitle": null}'
 club_client -u sudo --pw <pw> applications preview 3 -o preview.pdf
@@ -158,8 +164,9 @@ category picks one with `--category <index>` (`applications show` lists the
 ones they fit as `fittingCategories`); otherwise the form is refused with
 `APPLICATION_CATEGORY_REQUIRED` (club_server#108). `save` is refused with
 `APPLICATION_INCOMPLETE` (each text is named with the print languages it lacks),
-`APPLICATION_INVALID_REFERENCE` or `APPLICATION_DOES_NOT_FIT` (the overflow in
-points); each refusal gets a one-line hint on stderr. Applications need
+`APPLICATION_INVALID_REFERENCE`, `APPLICATION_UNKNOWN_FACT` (each place,
+language and `{gap}` that names no fact of the template) or
+`APPLICATION_DOES_NOT_FIT` (the overflow in points); each refusal gets a one-line hint on stderr. Applications need
 `APPLICATIONS_ENABLED` and `IDENTITY_VERIFICATION_REQUIRED` both on; otherwise
 `capabilities` reports `applications: false` and every command answers 503
 `APPLICATIONS_DISABLED`.

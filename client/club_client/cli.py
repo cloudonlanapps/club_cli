@@ -321,9 +321,16 @@ ERROR_HINTS = {
         "(`applications show <id>` lists them)."
     ),
     "APPLICATION_INVALID_REFERENCE": (
-        "the clause is not in the library, or a gap has no fact, a fact fills no gap, or a fact "
-        "has the wrong type or an unknown choice (`applications clauses` lists each clause's gaps "
-        "and their types); on save, a label lacks a print language (`applications labels`)."
+        "the template's languages are not [\"en\"] or [\"en\", one other], a label lacks a print "
+        "language (`applications labels`), or a choices fact names a choice the library lacks "
+        "(`applications clauses` lists the choices)."
+    ),
+    "APPLICATION_UNKNOWN_FACT": (
+        "a {gap} in a printed text names no fact of the template: add the fact to the template's "
+        "facts, or change the text, with `applications update <id>`."
+    ),
+    "APPLICATION_LIBRARY_TEXT_NOT_FOUND": (
+        "no such club text; `applications library list` shows them."
     ),
     "APPLICATION_INCOMPLETE": (
         "save needs the title, declaration and footer line, and every printed text in each print "
@@ -367,6 +374,13 @@ def explain_error(data: Any) -> str | None:
         hint += f" Missing: {'; '.join(texts)}."
     if code in ("APPLICATION_CATEGORY_REQUIRED", "APPLICATION_CATEGORY_NOT_FITTING") and details.get("categories"):
         hint += f" Fits categories: {', '.join(str(i) for i in details['categories'])}."
+    if code == "APPLICATION_UNKNOWN_FACT" and details.get("gaps"):
+        # {gaps: [{place, language, gap}]}, in print order (club_server#126, cli #56).
+        texts = [
+            f"{g.get('place')} ({g.get('language')}): {{{g.get('gap')}}}" if isinstance(g, dict) else str(g)
+            for g in details["gaps"]
+        ]
+        hint += f" Gaps: {'; '.join(texts)}."
     if code == "APPLICATION_DOES_NOT_FIT" and details.get("overflowPt") is not None:
         hint += f" Over by {details['overflowPt']} pt."
     return f"{code}: {hint}"
@@ -3588,7 +3602,8 @@ APPLICATION_TEMPLATE_HELP = """\b
                      or {name: {"type": "date_range", "from": ms, "to": ms}};
                      dates are UTC-midnight ms, a time "H:MM", an amount a
                      whole number, a name text or {lang: text}, choices a
-                     list of the library's choice ids
+                     list of the library's choice ids; name matches
+                     [a-z][a-z0-9_]*
       organisation, title, subtitle, declaration, formFooter   a printed text
       header         a list of printed texts (an item may be a list: one per line)
       ageCategories  [{"label": {lang: text}, "bornOnOrAfterUtc"?, "bornOnOrBeforeUtc"?,
@@ -3597,11 +3612,16 @@ APPLICATION_TEMPLATE_HELP = """\b
       terms          [{"heading": {lang: text}, "body": {lang: text}}]
       termsNotes     [{"text": {lang: text}, "attribution"?: {lang: text}}]
       labelOverrides {label id: {lang: text}}  (ids from `applications labels`)
-    A printed text is {lang: text} and nothing else (club_server#107): a
-    {"clause": ...} or {"fact": ...} reference anywhere → 422. To use a
-    library clause, fill it with `applications fill-clause` and paste its
-    text (and heading, for a rule) in. facts are kept for the editor and
-    never printed. A shape that does not fit → 422."""
+    A printed text is {lang: text} and nothing else: a {"clause": ...} or
+    {"fact": ...} reference anywhere → 422. A text may hold {name} gaps in
+    any language (club_server#126), each filled at print with the fact of
+    that name, in the text's language; other brace text ({Venue}, {1st})
+    prints as written. A draft takes any gap; `applications save` refuses
+    one that names no fact (422 APPLICATION_UNKNOWN_FACT). To use a clause
+    or a club text, copy its text (and heading, for a rule) from
+    `applications clauses` as written, gaps included, and give the
+    template a fact for each gap. Label overrides, age-category labels and
+    fact values print as written. A shape that does not fit → 422."""
 
 
 def application_template_help(command):
@@ -3755,8 +3775,11 @@ def applications_save(ctx: Context, application_id: int):
     (details.missing: [{field, languages}], each text and the print languages
     it lacks), APPLICATION_INVALID_REFERENCE
     (languages not ["en"] or ["en", one other], or a label without a print
-    language) or APPLICATION_DOES_NOT_FIT (details.overflowPt: the details alone overflow
-    page 1 by that many points).
+    language), APPLICATION_UNKNOWN_FACT (details.gaps: [{place, language,
+    gap}], each {gap} in a printed text that names no fact of the template,
+    in print order; club_server#126) or APPLICATION_DOES_NOT_FIT
+    (details.overflowPt: the details alone overflow page 1 by that many
+    points). The layout is measured on the texts with their gaps filled.
 
     Example: applications save 3
     """
@@ -3811,62 +3834,182 @@ def applications_labels(ctx: Context):
 @applications.command("clauses")
 @pass_context
 def applications_clauses(ctx: Context):
-    """The clause library (admin): {languages, choices, clauses: {id: {kind, gaps, heading?, text}}}.
+    """The texts an editor can paste (admin): {languages, choices, clauses: [...]}.
 
-    Each clause's gaps name the fact type each takes; `applications
-    fill-clause` fills one with facts for its gaps, for a template's text.
+    \b
+    clauses is a list (club_server#126): the built-in clauses first, in
+    library order, then the club's own texts, oldest first. Each is
+      {source: "builtin"|"club", key, id, kind, name, gaps, heading, text}
+    a built-in clause has its key (e.g. "rule.fee") and gaps ({gap: fact
+    type}), with id and name null; a club text has its id and name (from
+    `applications library`), with key and gaps null. text and heading
+    ({lang: text}, heading a rule's only) come as written, {gap}s
+    included: copy them into a template and give it a fact for each gap.
+    choices are the ids a choices fact takes.
 
     Example: applications clauses
     """
     print_response(httpx.get(f"{ctx.base_url}/v1/applications/clauses", headers=ctx.headers))
 
 
-@applications.command("fill-clause")
-@click.argument("clause")
-@click.option("--facts", "facts_value", help="The facts for the clause's gaps as inline JSON: {gap: fact}")
-@click.option("--file", type=click.Path(exists=True, dir_okay=False), help="Read the facts from a JSON file")
-@pass_context
-def applications_fill_clause(ctx: Context, clause: str, facts_value: str | None, file: str | None):
-    """Fill one library clause (admin): its text in every library language.
+# ── The club's library of texts (club_server#126) ───────────────────────
 
-    \b
-    CLAUSE is a clause id from `applications clauses`; the facts give a
-    fact for each of its gaps, of the type the gap names:
-      {gap: {"type": "date"|"time"|"amount"|"name"|"choices", "value": ...}}
-      {gap: {"type": "date_range", "from": ms, "to": ms}}
-    (dates are UTC-midnight ms). A clause without gaps needs no facts.
+LIBRARY_TEXT_KINDS = ["header", "selection", "declaration", "rule", "note"]
 
-    Prints {clause, heading, text}: text is {lang: text}, and heading is
-    {lang: text} for a rule (null otherwise). Paste them into a template's
-    printed texts (a rule as {"heading": ..., "body": text}); no template
-    is read or changed. An unknown clause, a gap without a fact, a fact for
-    no gap, a fact of the wrong type or an unknown choice → 422
-    APPLICATION_INVALID_REFERENCE (club_server#107).
+LIBRARY_TEXT_HELP = """\b
+    A club text is {id, kind, name, heading, text, createdBy, createdAtUtc,
+    updatedAtUtc}: kind one of header, selection, declaration, rule, note;
+    name 1-100 characters, for the editor's picker; text, and a rule's
+    heading, {lang: text} in the library languages (en, mr, hi), at least
+    one, each non-empty, {gap}s allowed. --text LANG TEXT and --heading
+    LANG TEXT give one language each and repeat. A heading on any kind but
+    rule → 422."""
 
-    Example: applications fill-clause rule.fee --facts '{"amount": {"type": "amount", "value": 1500}}'
-    Example: applications fill-clause header.training_camp --file camp_facts.json
-    Example: applications fill-clause declaration.trial
+
+def library_text_help(command):
+    """Fill {LIBRARY_TEXT_HELP} in a command's docstring; goes directly above the `def`."""
+    command.__doc__ = command.__doc__.replace("{LIBRARY_TEXT_HELP}", LIBRARY_TEXT_HELP)
+    return command
+
+
+def language_map(option: str, pairs: tuple[tuple[str, str], ...]) -> dict[str, str]:
+    """--text/--heading LANG TEXT pairs as {lang: text}; a language given twice is refused."""
+    out: dict[str, str] = {}
+    for lang, text in pairs:
+        if lang in out:
+            raise click.UsageError(f"{option} gives {lang!r} twice.")
+        out[lang] = text
+    return out
+
+
+def _library_url(ctx: Context, text_id: int | None = None) -> str:
+    if text_id is None:
+        return f"{ctx.base_url}/v1/applications/library"
+    return f"{ctx.base_url}/v1/applications/library/{text_id}"
+
+
+@applications.group("library")
+def applications_library():
+    """The club's own texts for templates (admin): list, get, create, update, delete.
+
+    One library for the whole club, next to the built-in clauses;
+    `applications clauses` lists both. A coach or member → 403, and while
+    `capabilities` reports applications false → 503 APPLICATIONS_DISABLED.
+    An unknown id → 404 APPLICATION_LIBRARY_TEXT_NOT_FOUND.
     """
-    if facts_value is not None and file is not None:
-        raise click.UsageError("Pass at most one of --facts '<json>' or --file <path>.")
-    facts: Any = {}
-    if file is not None:
-        with open(file) as f:
-            facts = json.load(f)
-    elif facts_value is not None:
-        try:
-            facts = json.loads(facts_value)
-        except json.JSONDecodeError as e:
-            raise click.UsageError(f"--facts must be a JSON object {{gap: fact}}: {e}")
-    if not isinstance(facts, dict):
-        raise click.UsageError("The facts must be a JSON object {gap: fact}.")
-    print_response(
-        httpx.post(
-            f"{ctx.base_url}/v1/applications/clauses/fill",
-            json={"clause": clause, "facts": facts},
-            headers=ctx.headers,
-        )
-    )
+    pass
+
+
+@applications_library.command("list")
+@pass_context
+def applications_library_list(ctx: Context):
+    """Every club text, oldest first: a list of {id, kind, name, heading, text, ...}.
+
+    Example: applications library list
+    """
+    print_response(httpx.get(_library_url(ctx), headers=ctx.headers))
+
+
+@applications_library.command("get")
+@click.argument("text_id", type=int)
+@pass_context
+def applications_library_get(ctx: Context, text_id: int):
+    """One club text.
+
+    Example: applications library get 4
+    """
+    print_response(httpx.get(_library_url(ctx, text_id), headers=ctx.headers))
+
+
+@applications_library.command("create")
+@click.option("--kind", type=click.Choice(LIBRARY_TEXT_KINDS), required=True, help="What the text is for")
+@click.option("--name", required=True, help="A short name for the editor's picker (1-100 characters)")
+@click.option(
+    "--text", "text", type=(str, str), multiple=True, required=True, metavar="LANG TEXT",
+    help="The text in one language; repeat per language",
+)
+@click.option(
+    "--heading", "heading", type=(str, str), multiple=True, metavar="LANG TEXT",
+    help="A rule's heading in one language; repeat per language",
+)
+@pass_context
+@library_text_help
+def applications_library_create(
+    ctx: Context, kind: str, name: str, text: tuple[tuple[str, str], ...], heading: tuple[tuple[str, str], ...],
+):
+    """Add a club text (admin); prints it with its id.
+
+    {LIBRARY_TEXT_HELP}
+
+    Example: applications library create --kind rule --name Fee --heading en Fee --text en 'A fee of ₹{amount} is payable.'
+    Example: applications library create --kind note --name Kit --text en 'Bring a helmet.' --text mr 'हेल्मेट आणा.'
+    """
+    body: dict[str, Any] = {"kind": kind, "name": name, "text": language_map("--text", text)}
+    if heading:
+        body["heading"] = language_map("--heading", heading)
+    print_response(httpx.post(_library_url(ctx), json=body, headers=ctx.headers))
+
+
+@applications_library.command("update")
+@click.argument("text_id", type=int)
+@click.option("--kind", type=click.Choice(LIBRARY_TEXT_KINDS), help="Change what the text is for")
+@click.option("--name", help="Rename it (1-100 characters)")
+@click.option(
+    "--text", "text", type=(str, str), multiple=True, metavar="LANG TEXT",
+    help="Replace the whole text: one language per option, repeat per language",
+)
+@click.option(
+    "--heading", "heading", type=(str, str), multiple=True, metavar="LANG TEXT",
+    help="Replace a rule's whole heading: one language per option, repeat per language",
+)
+@click.option("--clear-heading", is_flag=True, default=False, help="Remove the heading (send it as null)")
+@pass_context
+@library_text_help
+def applications_library_update(
+    ctx: Context, text_id: int, kind: str | None, name: str | None,
+    text: tuple[tuple[str, str], ...], heading: tuple[tuple[str, str], ...], clear_heading: bool,
+):
+    """Change a club text (admin): each field given replaces the stored one.
+
+    A field left out keeps its value. --text and --heading replace the
+    whole language map, so give every language to keep. The result must
+    still be a valid text: a heading left on a text whose kind is no
+    longer rule → 422 and nothing changes (pass --clear-heading with
+    --kind). Templates that copied the text keep their copy.
+
+    {LIBRARY_TEXT_HELP}
+
+    Example: applications library update 4 --name 'Registration fee'
+    Example: applications library update 4 --text en 'Pay ₹{amount}.' --text mr '₹{amount} भरा.'
+    Example: applications library update 4 --kind note --clear-heading
+    """
+    if heading and clear_heading:
+        raise click.UsageError("Pass --heading or --clear-heading, not both.")
+    body: dict[str, Any] = {}
+    if kind is not None:
+        body["kind"] = kind
+    if name is not None:
+        body["name"] = name
+    if text:
+        body["text"] = language_map("--text", text)
+    if heading:
+        body["heading"] = language_map("--heading", heading)
+    if clear_heading:
+        body["heading"] = None
+    if not body:
+        raise click.UsageError("Nothing to change: pass --kind, --name, --text, --heading or --clear-heading.")
+    print_response(httpx.patch(_library_url(ctx, text_id), json=body, headers=ctx.headers))
+
+
+@applications_library.command("delete")
+@click.argument("text_id", type=int)
+@pass_context
+def applications_library_delete(ctx: Context, text_id: int):
+    """Remove a club text for good (admin); no template changes.
+
+    Example: applications library delete 4
+    """
+    print_response(httpx.delete(_library_url(ctx, text_id), headers=ctx.headers))
 
 
 @applications.command("preview")

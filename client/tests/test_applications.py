@@ -3,8 +3,8 @@
 `applications` wraps every /v1/applications route: the templates (list, show,
 create, update, delete, duplicate), the four state moves, the label catalogue
 and clause library, and the PDFs (preview, own form, a member's form).
-A template's printed texts are language maps; `fill-clause` fills one library
-clause for an admin to paste in (club_server#107, cli #45).
+A template's printed texts are language maps that may hold `{fact}` gaps, filled
+at print; `library` keeps the club's own texts (club_server#126, cli #56).
 """
 from __future__ import annotations
 
@@ -353,6 +353,8 @@ def test_issue_38_does_not_fit_hint_gives_the_overflow(monkeypatch):
     "APPLICATION_NOT_PUBLISHED",
     "APPLICATION_NOT_ELIGIBLE",
     "APPLICATION_INVALID_REFERENCE",
+    "APPLICATION_UNKNOWN_FACT",
+    "APPLICATION_LIBRARY_TEXT_NOT_FOUND",
 ])
 def test_issue_38_application_refusals_get_a_hint(monkeypatch, code):
     fake = FakeHttp().install(monkeypatch)
@@ -364,100 +366,223 @@ def test_issue_38_application_refusals_get_a_hint(monkeypatch, code):
     assert res.stderr.strip().splitlines()[-1].startswith(f"{code}:")
 
 
-# ── Filling one clause (club_server#107, cli #45) ───────────────────────
+# ── Gaps naming no fact (club_server#126, cli #56) ─────────────────────
 
-FILL = f"{A}/clauses/fill"
-FEE_FACTS = {"amount": {"type": "amount", "value": 1500}}
-FILLED = {
-    "clause": "rule.fee",
-    "heading": {"en": "Fee", "mr": "शुल्क", "hi": "शुल्क"},
-    "text": {"en": "The fee is ₹1500.", "mr": "शुल्क ₹1500 आहे.", "hi": "शुल्क ₹1500 है।"},
+
+def test_issue_56_unknown_fact_hint_names_each_place_language_and_gap(monkeypatch):
+    fake = FakeHttp().install(monkeypatch)
+    fake.on(
+        "POST", f"{A}/7/save",
+        _refusal("APPLICATION_UNKNOWN_FACT", gaps=[
+            {"place": "selections[0]", "language": "mr", "gap": "camp_dates"},
+            {"place": "terms[1].body", "language": "en", "gap": "venue"},
+        ]),
+        status=422,
+    )
+
+    res = run("applications", "save", "7")
+
+    assert res.exit_code != 0
+    hint = res.stderr.strip().splitlines()[-1]
+    assert hint.startswith("APPLICATION_UNKNOWN_FACT: ")
+    assert "facts" in hint
+    assert hint.endswith("Gaps: selections[0] (mr): {camp_dates}; terms[1].body (en): {venue}.")
+
+
+def test_issue_56_unknown_fact_hint_without_details_is_just_the_hint(monkeypatch):
+    fake = FakeHttp().install(monkeypatch)
+    fake.on("POST", f"{A}/7/save", _refusal("APPLICATION_UNKNOWN_FACT"), status=422)
+
+    res = run("applications", "save", "7")
+
+    hint = res.stderr.strip().splitlines()[-1]
+    assert hint.startswith("APPLICATION_UNKNOWN_FACT: ")
+    assert "Gaps:" not in hint
+
+
+def test_issue_56_save_help_names_the_unknown_fact_refusal():
+    text = " ".join(CliRunner().invoke(main, ["applications", "save", "--help"]).output.split())
+
+    assert "APPLICATION_UNKNOWN_FACT" in text
+    assert "details.gaps" in text
+
+
+def test_issue_56_clause_help_describes_the_list_and_fill_clause_is_gone():
+    clauses = " ".join(CliRunner().invoke(main, ["applications", "clauses", "--help"]).output.split())
+    gone = CliRunner().invoke(main, ["applications", "fill-clause", "--help"])
+
+    for word in ("source", "builtin", "club", "key", "id", "gaps", "applications library"):
+        assert word in clauses, word
+    assert gone.exit_code != 0
+
+
+def test_issue_56_template_help_explains_gaps_and_facts():
+    text = " ".join(CliRunner().invoke(main, ["applications", "create", "--help"]).output.split())
+
+    assert "fill-clause" not in text
+    assert "{name}" in text and "APPLICATION_UNKNOWN_FACT" in text
+    assert '"heading": {lang: text}, "body": {lang: text}' in text
+
+
+# ── The club's library of texts (club_server#126, cli #56) ──────────────
+
+LIB = f"{A}/library"
+LIB_TEXT = {
+    "id": 4, "kind": "rule", "name": "Fee", "heading": {"en": "Fee"},
+    "text": {"en": "The fee is ₹{amount}.", "mr": "शुल्क ₹{amount} आहे."},
+    "createdBy": "sudo", "createdAtUtc": 1, "updatedAtUtc": 1,
 }
 
 
-def test_issue_45_fill_clause_posts_the_clause_and_its_facts(monkeypatch):
+def test_issue_56_library_list_reads_every_club_text(monkeypatch):
     fake = FakeHttp().install(monkeypatch)
-    fake.on("POST", FILL, FILLED)
+    fake.on("GET", LIB, [LIB_TEXT])
 
-    res = run("applications", "fill-clause", "rule.fee", "--facts", json.dumps(FEE_FACTS))
+    res = run("applications", "library", "list")
 
     assert res.exit_code == 0, res.output
-    (call,) = fake.calls_to("POST", FILL)
-    assert call.json == {"clause": "rule.fee", "facts": FEE_FACTS}
-    assert json.loads(res.output) == FILLED
+    assert json.loads(res.stdout) == [LIB_TEXT]
+    (call,) = fake.calls_to("GET", LIB)
+    assert not call.params
 
 
-def test_issue_45_fill_clause_reads_the_facts_from_a_file(monkeypatch, tmp_path):
+def test_issue_56_library_get_reads_one_text(monkeypatch):
     fake = FakeHttp().install(monkeypatch)
-    fake.on("POST", FILL, FILLED)
-    path = tmp_path / "facts.json"
-    path.write_text(json.dumps(FEE_FACTS), encoding="utf-8")
+    fake.on("GET", f"{LIB}/4", LIB_TEXT)
 
-    res = run("applications", "fill-clause", "rule.fee", "--file", str(path))
+    res = run("applications", "library", "get", "4")
 
     assert res.exit_code == 0, res.output
-    assert fake.calls_to("POST", FILL)[0].json == {"clause": "rule.fee", "facts": FEE_FACTS}
+    assert json.loads(res.stdout) == LIB_TEXT
 
 
-def test_issue_45_a_clause_without_gaps_sends_no_facts(monkeypatch):
+def test_issue_56_library_create_sends_kind_name_heading_and_each_language(monkeypatch):
     fake = FakeHttp().install(monkeypatch)
-    fake.on("POST", FILL, {"clause": "declaration.trial", "heading": None, "text": {"en": "I agree."}})
+    fake.on("POST", LIB, LIB_TEXT, status=201)
 
-    res = run("applications", "fill-clause", "declaration.trial")
+    res = run(
+        "applications", "library", "create", "--kind", "rule", "--name", "Fee",
+        "--text", "en", "The fee is ₹{amount}.", "--text", "mr", "शुल्क ₹{amount} आहे.",
+        "--heading", "en", "Fee",
+    )
 
     assert res.exit_code == 0, res.output
-    assert fake.calls_to("POST", FILL)[0].json == {"clause": "declaration.trial", "facts": {}}
+    (call,) = fake.calls_to("POST", LIB)
+    assert call.json == {
+        "kind": "rule", "name": "Fee", "heading": {"en": "Fee"},
+        "text": {"en": "The fee is ₹{amount}.", "mr": "शुल्क ₹{amount} आहे."},
+    }
 
 
-@pytest.mark.parametrize("facts", ["[1, 2]", '"amount"', "not json"])
-def test_issue_45_facts_must_be_a_json_object(monkeypatch, facts):
+def test_issue_56_library_create_without_heading_sends_none(monkeypatch):
+    fake = FakeHttp().install(monkeypatch)
+    fake.on("POST", LIB, {**LIB_TEXT, "kind": "note", "heading": None}, status=201)
+
+    res = run("applications", "library", "create", "--kind", "note", "--name", "Rules", "--text", "en", "Follow them.")
+
+    assert res.exit_code == 0, res.output
+    assert fake.calls_to("POST", LIB)[0].json == {"kind": "note", "name": "Rules", "text": {"en": "Follow them."}}
+
+
+@pytest.mark.parametrize("args", [
+    ("--name", "Fee", "--text", "en", "x"),                         # no kind
+    ("--kind", "rule", "--text", "en", "x"),                        # no name
+    ("--kind", "rule", "--name", "Fee"),                            # no text
+    ("--kind", "footer", "--name", "Fee", "--text", "en", "x"),     # unknown kind
+    ("--kind", "rule", "--name", "Fee", "--text", "en", "x", "--text", "en", "y"),  # a language twice
+])
+def test_issue_56_library_create_refuses_a_bad_command_line(monkeypatch, args):
     fake = FakeHttp().install(monkeypatch)
 
-    res = run("applications", "fill-clause", "rule.fee", "--facts", facts)
+    res = run("applications", "library", "create", *args)
 
     assert res.exit_code != 0
     assert fake.calls == []
 
 
-def test_issue_45_facts_inline_and_from_a_file_are_refused(monkeypatch, tmp_path):
+def test_issue_56_library_update_sends_only_the_fields_given(monkeypatch):
     fake = FakeHttp().install(monkeypatch)
-    path = tmp_path / "facts.json"
-    path.write_text("{}")
+    fake.on("PATCH", f"{LIB}/4", LIB_TEXT)
 
-    res = run("applications", "fill-clause", "rule.fee", "--facts", "{}", "--file", str(path))
+    res = run("applications", "library", "update", "4", "--name", "Registration fee")
+
+    assert res.exit_code == 0, res.output
+    assert fake.calls_to("PATCH", f"{LIB}/4")[0].json == {"name": "Registration fee"}
+
+
+def test_issue_56_library_update_sends_every_field(monkeypatch):
+    fake = FakeHttp().install(monkeypatch)
+    fake.on("PATCH", f"{LIB}/4", LIB_TEXT)
+
+    res = run(
+        "applications", "library", "update", "4", "--kind", "rule", "--name", "Fee",
+        "--text", "en", "Pay ₹{amount}.", "--text", "hi", "₹{amount} दें।", "--heading", "hi", "शुल्क",
+    )
+
+    assert res.exit_code == 0, res.output
+    assert fake.calls_to("PATCH", f"{LIB}/4")[0].json == {
+        "kind": "rule", "name": "Fee", "heading": {"hi": "शुल्क"},
+        "text": {"en": "Pay ₹{amount}.", "hi": "₹{amount} दें।"},
+    }
+
+
+def test_issue_56_library_update_clears_the_heading(monkeypatch):
+    fake = FakeHttp().install(monkeypatch)
+    fake.on("PATCH", f"{LIB}/4", {**LIB_TEXT, "kind": "note", "heading": None})
+
+    res = run("applications", "library", "update", "4", "--clear-heading", "--kind", "note")
+
+    assert res.exit_code == 0, res.output
+    assert fake.calls_to("PATCH", f"{LIB}/4")[0].json == {"kind": "note", "heading": None}
+
+
+@pytest.mark.parametrize("args", [
+    (),                                                     # nothing to change
+    ("--heading", "en", "Fee", "--clear-heading"),          # set and clear
+    ("--kind", "banner",),                                  # unknown kind
+])
+def test_issue_56_library_update_refuses_a_bad_command_line(monkeypatch, args):
+    fake = FakeHttp().install(monkeypatch)
+
+    res = run("applications", "library", "update", "4", *args)
 
     assert res.exit_code != 0
     assert fake.calls == []
 
 
-def test_issue_45_an_invalid_reference_points_at_the_clause_library(monkeypatch):
+def test_issue_56_library_delete_deletes_one_text(monkeypatch):
     fake = FakeHttp().install(monkeypatch)
-    fake.on("POST", FILL, _refusal("APPLICATION_INVALID_REFERENCE"), status=422)
+    fake.on("DELETE", f"{LIB}/4", status=204)
 
-    res = run("applications", "fill-clause", "rule.no_such_clause")
+    res = run("applications", "library", "delete", "4")
+
+    assert res.exit_code == 0, res.output
+    assert len(fake.calls_to("DELETE", f"{LIB}/4")) == 1
+
+
+def test_issue_56_an_unknown_library_text_gets_a_hint(monkeypatch):
+    fake = FakeHttp().install(monkeypatch)
+    fake.on("GET", f"{LIB}/99", _refusal("APPLICATION_LIBRARY_TEXT_NOT_FOUND"), status=404)
+
+    res = run("applications", "library", "get", "99")
 
     assert res.exit_code != 0
-    assert "APPLICATION_INVALID_REFERENCE: " in res.output
-    assert "applications clauses" in res.output
+    hint = res.stderr.strip().splitlines()[-1]
+    assert hint.startswith("APPLICATION_LIBRARY_TEXT_NOT_FOUND: ")
+    assert "applications library list" in hint
 
 
-def test_issue_45_fill_clause_help_shows_the_facts_and_the_answer():
-    res = CliRunner().invoke(main, ["applications", "fill-clause", "--help"])
+def test_issue_56_library_help_lists_its_commands_and_options():
+    group = CliRunner().invoke(main, ["applications", "library", "--help"]).output
+    create = " ".join(CliRunner().invoke(main, ["applications", "library", "create", "--help"]).output.split())
+    update = " ".join(CliRunner().invoke(main, ["applications", "library", "update", "--help"]).output.split())
 
-    text = " ".join(res.output.split())
-    assert res.exit_code == 0
-    for word in ("--facts", "--file", "heading", "text", "date_range", "applications clauses"):
-        assert word in text, word
-
-
-def test_issue_45_template_help_takes_language_maps_only():
-    res = CliRunner().invoke(main, ["applications", "create", "--help"])
-
-    text = " ".join(res.output.split())
-    assert res.exit_code == 0
-    assert '{"clause": id' not in text and '{"fact": name}' not in text
-    assert "→ 422" in text and "fill-clause" in text
-    assert '"heading": {lang: text}, "body": {lang: text}' in text
+    for command in ("list", "get", "create", "update", "delete"):
+        assert f"  {command} " in group, command
+    for word in ("--kind", "--name", "--text", "--heading", "header", "selection", "declaration", "rule", "note"):
+        assert word in create, word
+    for word in ("--kind", "--name", "--text", "--heading", "--clear-heading"):
+        assert word in update, word
 
 
 # ── Help ────────────────────────────────────────────────────────────────
@@ -469,7 +594,7 @@ def test_issue_38_group_help_lists_every_command():
     assert res.exit_code == 0
     for command in (
         "list", "show", "create", "update", "delete", "duplicate", "save", "publish",
-        "unpublish", "revert", "preview", "labels", "clauses", "fill-clause", "form",
+        "unpublish", "revert", "preview", "labels", "clauses", "library", "form",
     ):
         assert f"  {command} " in res.output, command
 
