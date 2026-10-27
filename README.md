@@ -153,7 +153,7 @@ club_client -u alice --pw <pw> applications form 3         # writes application-
 
 The PDF commands write `-o FILE`, or by default `application-<id>-<username>.pdf`
 in the current directory, and print the path. `save` is refused with
-`APPLICATION_INCOMPLETE` (the texts missing a print language are named),
+`APPLICATION_INCOMPLETE` (each text is named with the print languages it lacks),
 `APPLICATION_INVALID_REFERENCE` or `APPLICATION_DOES_NOT_FIT` (the overflow in
 points); each refusal gets a one-line hint on stderr. Applications need
 `APPLICATIONS_ENABLED` and `IDENTITY_VERIFICATION_REQUIRED` both on; otherwise

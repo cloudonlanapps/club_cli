@@ -171,7 +171,7 @@ def test_issue_38_save_names_the_texts_missing_a_language(live: Live):
     res = live.refused("applications", "save", app_id)
 
     assert "APPLICATION_INCOMPLETE" in res.output
-    assert "Missing in 'mr': formFooter" in res.stderr
+    assert "Missing: formFooter (mr)." in res.stderr  # the details' shape since club_server#101 (cli #50)
     assert live.ok("applications", "show", app_id)["status"] == "draft"
 
 

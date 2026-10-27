@@ -351,7 +351,12 @@ def explain_error(data: Any) -> str | None:
         hint += f" Items: {', '.join(str(i) for i in item_ids)}."
     details = detail.get("details") if isinstance(detail.get("details"), dict) else {}
     if code == "APPLICATION_INCOMPLETE" and details.get("missing"):
-        hint += f" Missing in {details.get('language')!r}: {', '.join(str(m) for m in details['missing'])}."
+        # {missing: [{field, languages}]} since club_server#101 (cli #50).
+        texts = [
+            f"{m.get('field')} ({', '.join(m.get('languages') or [])})" if isinstance(m, dict) else str(m)
+            for m in details["missing"]
+        ]
+        hint += f" Missing: {'; '.join(texts)}."
     if code == "APPLICATION_DOES_NOT_FIT" and details.get("overflowPt") is not None:
         hint += f" Over by {details['overflowPt']} pt."
     return f"{code}: {hint}"
@@ -3731,8 +3736,9 @@ def applications_duplicate(ctx: Context, application_id: int):
 def applications_save(ctx: Context, application_id: int):
     """Draft → saved (admin): checked complete, the layout decided and stored.
 
-    Refused, and left a draft, with 422 APPLICATION_INCOMPLETE (details.missing
-    names each text lacking details.language), APPLICATION_INVALID_REFERENCE
+    Refused, and left a draft, with 422 APPLICATION_INCOMPLETE
+    (details.missing: [{field, languages}], each text and the print languages
+    it lacks), APPLICATION_INVALID_REFERENCE
     (languages not ["en"] or ["en", one other], or a label without a print
     language) or APPLICATION_DOES_NOT_FIT (details.overflowPt: the details alone overflow
     page 1 by that many points).
