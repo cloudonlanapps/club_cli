@@ -2269,6 +2269,10 @@ def occurrences_list(
 ):
     """List occurrences across all events (admin/coach).
 
+    Each occurrence carries attendanceExpected, the members whose enrollment
+    covers it, and attendanceMarked, how many of them are marked present,
+    absent, late or on leave (a pending leave request is not marked).
+
     Example: occurrences list
     Example: occurrences list --from "2026-05-01T00:00:00" --days 7
     Example: occurrences list --event-id 6034
