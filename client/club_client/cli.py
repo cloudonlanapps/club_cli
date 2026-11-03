@@ -2272,6 +2272,9 @@ def occurrences_list(
     Each occurrence carries attendanceExpected, the members whose enrollment
     covers it, and attendanceMarked, how many of them are marked present,
     absent, late or on leave (a pending leave request is not marked).
+    It also carries the requests waiting on staff: leaveRequestsPending
+    (this session's leave requests), enrollmentRequestsPending and
+    withdrawalRequestsPending (the event's join and withdrawal requests).
 
     Example: occurrences list
     Example: occurrences list --from "2026-05-01T00:00:00" --days 7

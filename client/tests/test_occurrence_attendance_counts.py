@@ -45,3 +45,11 @@ def test_issue_62_occurrences_list_counts_expected_and_marked_members(live: Live
             json.dumps({"records": [{"membername": members[0], "status": "present"}]}))
 
     assert counts() == (2, 1)
+
+
+def test_issue_66_occurrences_list_help_names_the_pending_request_counts():
+    out = run("occurrences", "list", "--help").output
+
+    assert "leaveRequestsPending" in out
+    assert "enrollmentRequestsPending" in out
+    assert "withdrawalRequestsPending" in out
