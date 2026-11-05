@@ -244,7 +244,7 @@ def explain_stale_version(data: Any) -> str | None:
 # what to do next. Printed on stderr after the response itself.
 ERROR_HINTS = {
     "EVENT_ALREADY_STARTED": (
-        "it has started, so its window can no longer move. Fix its timetable with "
+        "attendance has been recorded, so its window can no longer move. Fix its timetable with "
         "`event update <id> '{\"sessions\": [...]}'`, or move single occurrences "
         "with `occurrences reschedule`."
     ),

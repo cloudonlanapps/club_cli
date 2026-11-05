@@ -300,6 +300,7 @@ def test_issue_25_started_event_is_explained(monkeypatch):
 
     assert res.exit_code != 0
     assert "EVENT_ALREADY_STARTED" in res.output
+    assert "attendance has been recorded" in res.output
     assert "occurrences reschedule" in res.output
 
 
