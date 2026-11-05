@@ -180,12 +180,28 @@ def test_stale_version_on_a_reschedule_is_refused(live: Live):
     assert "retry with --version 2" in res.stderr
 
 
-def test_started_camp_cannot_move_and_says_what_to_do(live: Live):
+def test_issue_68_started_camp_without_attendance_moves(live: Live):
     camp = live.event("camp", days_from_today(-2), rrule="FREQ=DAILY;COUNT=10")
+    venue = live.venue()
 
-    res = live.refused("event", "update", str(camp["id"]), json.dumps({"venueId": live.venue()}))
+    moved = live.ok("event", "update", str(camp["id"]), json.dumps({"venueId": venue}))
+
+    assert moved["venueId"] == venue
+
+
+def test_issue_68_camp_with_attendance_cannot_move_and_says_what_to_do(live: Live):
+    member = live.active_member()
+    start = days_from_today(-2)
+    camp = live.event("camp", start, rrule="FREQ=DAILY;COUNT=10")
+    eid = str(camp["id"])
+    live.ok("enrollment", "assign", eid, member)
+    live.ok("occurrences", "mark-attendance", eid, slot(start),
+            json.dumps({"records": [{"membername": member, "status": "present"}]}))
+
+    res = live.refused("event", "update", eid, json.dumps({"venueId": live.venue()}))
 
     assert "EVENT_ALREADY_STARTED" in res.stdout
+    assert "attendance has been recorded" in res.stderr
     assert "occurrences reschedule" in res.stderr
 
 
